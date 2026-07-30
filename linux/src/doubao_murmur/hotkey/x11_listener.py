@@ -19,6 +19,10 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+# Xlib.XK only exposes this after load_keysym_group("xkb"), which mutates
+# module-global state, so spell the keysym out instead.
+XK_ISO_LEVEL3_SHIFT = 0xFE03
+
 
 class X11KeyListener:
     """Global X11 key listener using the XRecord extension."""
@@ -34,7 +38,7 @@ class X11KeyListener:
         self._context = None
         self._right_alt_down = False
         self._other_key_pressed = False
-        self._kc_alt_r = 0
+        self._kc_toggle: frozenset[int] = frozenset()
         self._kc_escape = 0
         # For the Ctrl+Super+Shift chord that toggles the on-screen keyboard.
         # All modifier keys -> they never emit characters, so the passive
@@ -74,7 +78,7 @@ class X11KeyListener:
             self._record_dpy = Display()
             self._ctrl_dpy = Display()
 
-            self._kc_alt_r = self._ctrl_dpy.keysym_to_keycode(XK.XK_Alt_R)
+            self._kc_toggle = self._resolve_toggle_keycodes(XK)
             self._kc_escape = self._ctrl_dpy.keysym_to_keycode(XK.XK_Escape)
             self._kc_ctrl_l = self._ctrl_dpy.keysym_to_keycode(XK.XK_Control_L)
             self._kc_ctrl_r = self._ctrl_dpy.keysym_to_keycode(XK.XK_Control_R)
@@ -113,6 +117,45 @@ class X11KeyListener:
         )
         self._thread.start()
         return True
+
+    def _resolve_toggle_keycodes(self, XK) -> frozenset[int]:
+        """Keycodes for the physical right Alt key.
+
+        Right Alt usually reports Alt_R, but on layouts that provide a
+        third level -- us(altgr-intl), fr(azerty), de(nodeadkeys), ... --
+        it emits ISO_Level3_Shift instead and nothing is bound to Alt_R
+        at all. keysym_to_keycode() then returns 0, which matches no key,
+        so dictation could never be toggled. Prefer Alt_R and only fall
+        back to AltGr when the layout has no Alt_R, to avoid hijacking
+        AltGr on layouts where both exist.
+
+        A bare AltGr tap emits no character, and _handle_key() suppresses
+        the toggle once another key is pressed, so AltGr+<key> accented
+        input keeps working.
+        """
+        keycodes = {
+            kc for kc, _index
+            in self._ctrl_dpy.keysym_to_keycodes(XK.XK_Alt_R)
+        }
+        if keycodes:
+            return frozenset(keycodes)
+
+        keycodes = {
+            kc for kc, _index
+            in self._ctrl_dpy.keysym_to_keycodes(XK_ISO_LEVEL3_SHIFT)
+        }
+        if keycodes:
+            logger.info(
+                "Alt_R is unmapped on this layout; using ISO_Level3_Shift "
+                "(AltGr, keycodes %s) to toggle dictation",
+                sorted(keycodes),
+            )
+        else:
+            logger.warning(
+                "Neither Alt_R nor ISO_Level3_Shift is mapped; the "
+                "dictation hotkey will be inactive"
+            )
+        return frozenset(keycodes)
 
     def stop(self) -> None:
         self._running = False
@@ -201,7 +244,7 @@ class X11KeyListener:
             self._other_key_pressed = True
             return
 
-        if keycode == self._kc_alt_r:
+        if keycode in self._kc_toggle:
             if pressed:
                 self._right_alt_down = True
                 self._other_key_pressed = False
