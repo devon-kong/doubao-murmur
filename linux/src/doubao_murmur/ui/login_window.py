@@ -42,6 +42,11 @@ except (ImportError, ValueError):
         pass
 
 
+def _as_id(value) -> str:
+    """Normalise a localStorage id, which may be a number, to a string."""
+    return "" if value is None else str(value).strip()
+
+
 class LoginWindow:
     """WebKitGTK-based login window for doubao.com."""
 
@@ -213,14 +218,24 @@ class LoginWindow:
 
                 device_id = ""
                 web_id = ""
+                tea_cache = {}
 
                 if data.get("device_id_raw"):
                     parsed = json.loads(data["device_id_raw"])
-                    device_id = parsed.get("web_id", "")
+                    device_id = _as_id(parsed.get("web_id"))
 
                 if data.get("tea_cache_raw"):
-                    parsed = json.loads(data["tea_cache_raw"])
-                    web_id = parsed.get("web_id", "")
+                    tea_cache = json.loads(data["tea_cache_raw"])
+                    web_id = _as_id(tea_cache.get("web_id"))
+
+                # doubao.com dropped the `samantha_web_web_id` entry when it
+                # renamed its localStorage keys to the `flow_*` scheme, so
+                # device_id came back empty and no params were ever saved.
+                # The tea SDK cache still carries the same id.
+                if not device_id:
+                    device_id = _as_id(
+                        tea_cache.get("user_unique_id")
+                    ) or web_id
 
                 if device_id and web_id:
                     params = ASRParams(
