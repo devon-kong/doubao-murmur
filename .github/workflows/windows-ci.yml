@@ -61,13 +61,17 @@ jobs:
           /t:Restore /p:Configuration=Release /p:Platform=x64
           /p:RuntimeIdentifier=win-x64
 
+      # PublishDir is resolved relative to the project, not the working directory,
+      # so it has to be absolute to land where the later steps look for it.
       - name: Publish app
-        run: >
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
-          /t:Publish /p:Configuration=Release /p:Platform=x64
-          /p:RuntimeIdentifier=win-x64
-          /p:Version=${{ env.APP_VERSION }}
-          /p:PublishDir=publish\DoubaoMurmur\
+        shell: pwsh
+        run: |
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj `
+            /t:Publish /p:Configuration=Release /p:Platform=x64 `
+            /p:RuntimeIdentifier=win-x64 `
+            /p:Version=${env:APP_VERSION} `
+            "/p:PublishDir=$pwd\publish\DoubaoMurmur\"
+          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
 
       - name: Publish diagnostics tool
         run: >

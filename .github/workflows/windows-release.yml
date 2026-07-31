@@ -62,13 +62,16 @@ jobs:
           /t:Restore /p:Configuration=Release /p:Platform=${{ matrix.platform }}
           /p:RuntimeIdentifier=${{ matrix.rid }}
 
+      # PublishDir is resolved relative to the project, not the working directory.
       - name: Publish app
-        run: >
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
-          /t:Publish /p:Configuration=Release /p:Platform=${{ matrix.platform }}
-          /p:RuntimeIdentifier=${{ matrix.rid }}
-          /p:Version=${{ env.APP_VERSION }}
-          /p:PublishDir=publish\DoubaoMurmur\
+        shell: pwsh
+        run: |
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj `
+            /t:Publish /p:Configuration=Release /p:Platform=${{ matrix.platform }} `
+            /p:RuntimeIdentifier=${{ matrix.rid }} `
+            /p:Version=${env:APP_VERSION} `
+            "/p:PublishDir=$pwd\publish\DoubaoMurmur\"
+          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
 
       - name: Publish diagnostics tool
         run: >
