@@ -190,6 +190,28 @@ class PasteHelper:
     @staticmethod
     def _focused_window_is_terminal() -> bool:
         """Check whether the focused window is a terminal emulator (X11)."""
+        wm_classes = PasteHelper._focused_window_classes()
+        if not wm_classes:
+            return False
+        is_terminal = any(c in _TERMINAL_WM_CLASSES for c in wm_classes)
+        logger.info(
+            "Focused window class: %s (terminal=%s)",
+            "/".join(wm_classes),
+            is_terminal,
+        )
+        return is_terminal
+
+    @staticmethod
+    def _focused_window_classes() -> list[str]:
+        """Lowercased WM_CLASS entries of the focused window (X11).
+
+        `getwindowclassname` only exists in recent xdotool releases;
+        Debian/Ubuntu still ship 3.20160805, where it exits with
+        "Unknown command". Detection then always failed, so every paste
+        used Ctrl+V -- which terminals swallow instead of pasting. Fall
+        back to xprop, which lives in x11-utils and is present on any
+        desktop that has xdotool.
+        """
         for command in command_candidates("xdotool"):
             try:
                 result = subprocess.run(
@@ -199,13 +221,42 @@ class PasteHelper:
                     timeout=3,
                 )
                 wm_class = result.stdout.decode().strip().lower()
-                is_terminal = wm_class in _TERMINAL_WM_CLASSES
-                logger.info(
-                    "Focused window class: %s (terminal=%s)",
-                    wm_class,
-                    is_terminal,
+                if wm_class:
+                    return [wm_class]
+            except Exception as e:
+                logger.debug("xdotool getwindowclassname failed: %s", e)
+
+        window_id = ""
+        for command in command_candidates("xdotool"):
+            try:
+                result = subprocess.run(
+                    command + ["getactivewindow"],
+                    capture_output=True,
+                    check=True,
+                    timeout=3,
                 )
-                return is_terminal
+                window_id = result.stdout.decode().strip()
+                break
             except Exception as e:
                 logger.warning("Active window detection failed: %s", e)
-        return False
+        if not window_id:
+            return []
+
+        for command in command_candidates("xprop"):
+            try:
+                result = subprocess.run(
+                    command + ["-id", window_id, "WM_CLASS"],
+                    capture_output=True,
+                    check=True,
+                    timeout=3,
+                )
+                # WM_CLASS(STRING) = "terminator", "Terminator"
+                values = result.stdout.decode().partition("=")[2]
+                return [
+                    part.strip().strip('"').lower()
+                    for part in values.split(",")
+                    if part.strip()
+                ]
+            except Exception as e:
+                logger.warning("xprop WM_CLASS lookup failed: %s", e)
+        return []
