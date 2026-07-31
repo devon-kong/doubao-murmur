@@ -22,8 +22,9 @@ return command switch
     _ => ShowHelp(),
 };
 
-static int ParseSeconds(string[] args, int index, int fallback) =>
-    args.Length > index && int.TryParse(args[index], out var value) && value > 0 ? value : fallback;
+// Parameter is not called 'args': that name is taken by the top-level program.
+static int ParseSeconds(string[] argv, int index, int fallback) =>
+    argv.Length > index && int.TryParse(argv[index], out var value) && value > 0 ? value : fallback;
 
 static int ShowHelp()
 {

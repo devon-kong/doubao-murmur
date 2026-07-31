@@ -84,7 +84,6 @@ public sealed class WavFileSource : IAudioSource
             }
 
             Log.Info("WAV replay finished");
-            Completed?.Invoke();
         }
         catch (OperationCanceledException)
         {
@@ -93,6 +92,12 @@ public sealed class WavFileSource : IAudioSource
         catch (Exception ex)
         {
             Log.Error("WAV replay failed", ex);
+        }
+        finally
+        {
+            // Clears IsCapturing so callers polling for the end of playback finish.
+            Stop();
+            Completed?.Invoke();
         }
     }
 

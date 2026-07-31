@@ -55,9 +55,7 @@ public sealed partial class LoginWindow : Window
             // next to the executable and fails when installed under Program Files.
             Directory.CreateDirectory(AppConfig.WebView2UserDataDir);
             var environment = await CoreWebView2Environment.CreateAsync(
-                browserExecutableFolder: null,
-                userDataFolder: AppConfig.WebView2UserDataDir,
-                options: null);
+                null, AppConfig.WebView2UserDataDir, null);
 
             await Browser.EnsureCoreWebView2Async(environment);
         }
@@ -258,9 +256,9 @@ public sealed partial class LoginWindow : Window
 
         try
         {
-            // Passing null returns every cookie in the profile, which is what the
-            // Linux port does; filtering by domain then catches subdomains too.
-            var cookies = await Browser.CoreWebView2.CookieManager.GetCookiesAsync(null);
+            // Cookies applicable to the origin, which is what the macOS and Linux
+            // clients collect; the domain filter then keeps subdomain entries too.
+            var cookies = await Browser.CoreWebView2.CookieManager.GetCookiesAsync(AppConfig.Origin);
             var collected = new Dictionary<string, string>();
             foreach (var cookie in cookies)
             {

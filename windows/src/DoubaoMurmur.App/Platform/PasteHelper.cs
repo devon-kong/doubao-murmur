@@ -182,8 +182,8 @@ internal static class PasteHelper
         var inputs = new List<NativeMethods.INPUT>(text.Length * 2);
         foreach (var ch in text)
         {
-            inputs.Add(KeyInput(0, ch, NativeMethods.KEYEVENTF_UNICODE));
-            inputs.Add(KeyInput(0, ch, NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP));
+            inputs.Add(KeyInput(0, (ushort)ch, NativeMethods.KEYEVENTF_UNICODE));
+            inputs.Add(KeyInput(0, (ushort)ch, NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP));
 
             // SendInput takes an array; chunk it so very long transcriptions do not
             // allocate one huge block and so the target app can keep up.

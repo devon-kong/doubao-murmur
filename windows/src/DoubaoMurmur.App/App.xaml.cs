@@ -404,7 +404,8 @@ public partial class App : Application
         _ = Task.Delay(1500).ContinueWith(_ => Environment.Exit(0));
     }
 
-    private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    // Qualified: System.UnhandledExceptionEventArgs is also in scope via implicit usings.
+    private static void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         Log.Error("Unhandled exception", e.Exception);
         e.Handled = true;
