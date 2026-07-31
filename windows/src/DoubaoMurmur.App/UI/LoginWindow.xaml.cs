@@ -54,8 +54,10 @@ public sealed partial class LoginWindow : Window
             // Unpackaged apps must name their own user-data folder; the default sits
             // next to the executable and fails when installed under Program Files.
             Directory.CreateDirectory(AppConfig.WebView2UserDataDir);
-            var environment = await CoreWebView2Environment.CreateAsync(
-                null, AppConfig.WebView2UserDataDir, null);
+            // The Windows App SDK flavour of WebView2 exposes only CreateAsync() with
+            // no arguments; naming a user-data folder goes through the options form.
+            var environment = await CoreWebView2Environment.CreateWithOptionsAsync(
+                string.Empty, AppConfig.WebView2UserDataDir, new CoreWebView2EnvironmentOptions());
 
             await Browser.EnsureCoreWebView2Async(environment);
         }
