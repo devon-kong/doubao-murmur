@@ -13,7 +13,9 @@ from enum import Enum
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+from gi.repository import GLib, Gtk, Gdk
+
+from doubao_murmur.config import OVERLAY_WIDTH
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,10 @@ def _apply_layer_shell(window: Gtk.Window, role: OverlayRole) -> None:
     if role == OverlayRole.PTT:
         LayerShell.set_anchor(window, LayerShell.Edge.BOTTOM, True)
         LayerShell.set_margin(window, LayerShell.Edge.BOTTOM, 24)
+    elif role == OverlayRole.STATUS:
+        LayerShell.set_anchor(window, LayerShell.Edge.TOP, True)
+        LayerShell.set_anchor(window, LayerShell.Edge.LEFT, True)
+        _position_overlay_center_bottom(window)
     else:
         LayerShell.set_anchor(window, LayerShell.Edge.TOP, True)
         LayerShell.set_margin(window, LayerShell.Edge.TOP, 16)
@@ -86,6 +92,19 @@ def _apply_layer_shell(window: Gtk.Window, role: OverlayRole) -> None:
         mode = getattr(keyboard_mode, "ON_DEMAND", None)
         if mode is not None:
             set_keyboard_mode(window, mode)
+
+
+def _position_overlay_center_bottom(window: Gtk.Window) -> None:
+    """Position the overlay at the middle-lower area of the screen."""
+    display = Gdk.Display.get_default()
+    if display:
+        monitor = display.get_monitors().get_item(0) if display else None
+        if monitor is not None:
+            geo = monitor.get_geometry()
+            top_margin = geo.height * 3 // 5
+            left_margin = geo.x + (geo.width - OVERLAY_WIDTH) // 2
+            LayerShell.set_margin(window, LayerShell.Edge.TOP, top_margin)
+            LayerShell.set_margin(window, LayerShell.Edge.LEFT, left_margin)
 
 
 def _apply_legacy_hints(window: Gtk.Window) -> None:
@@ -99,27 +118,24 @@ def _apply_legacy_hints(window: Gtk.Window) -> None:
             method(value)
 
 
-def present_overlay(window: Gtk.Window, role: OverlayRole) -> None:
+def present_overlay(window: Gtk.Window, role: OverlayRole,
+                    x: int | None = None, y: int | None = None) -> None:
     """Present an overlay window and make sure it is actually visible.
 
     With layer-shell the compositor handles stacking/anchoring. On plain
     X11, KWin's focus-stealing prevention can leave a freshly mapped
     window buried below the active one, so after mapping we pin it above
     and position it via the X11 connection.
+
+    If x, y are provided they override the default position (e.g. saved
+    user position).
     """
     if _HAS_LAYER_SHELL and LayerShell is not None:
         window.present()
         return
-    # Set the no-focus input hint BEFORE the window maps, otherwise
-    # the WM grants it focus on map and the hint is too late.
     _x11_set_no_focus_pre_map(window)
-    # Map with set_visible() rather than present(): present() sends a
-    # _NET_ACTIVE_WINDOW activation request, which moves keyboard focus
-    # to the overlay no matter what the window's hints say.
     window.set_visible(True)
-    # Run after the surface has been mapped and sized; retry while the
-    # window reports zero size (mapping is asynchronous).
-    state = {"tries": 0}
+    state = {"tries": 0, "x": x, "y": y}
     GLib.timeout_add(50, _x11_pin_above, window, role, state)
 
 
@@ -156,8 +172,13 @@ def _x11_pin_above(window: Gtk.Window, role: OverlayRole, state: dict) -> bool:
 
     xid = surface.get_xid()
 
+    x = state.get("x")
+    y = state.get("y")
+    if x is not None and y is not None:
+        _x11_apply_wm_state(xid, x, y)
+        return GLib.SOURCE_REMOVE
+
     x = y = None
-    # The keyboard restores its own saved geometry; never auto-place it.
     if role != OverlayRole.KEYBOARD:
         display = window.get_display()
         monitor = display.get_monitors().get_item(0) if display else None
@@ -166,6 +187,8 @@ def _x11_pin_above(window: Gtk.Window, role: OverlayRole, state: dict) -> bool:
             x = geo.x + (geo.width - width) // 2
             if role == OverlayRole.PTT:
                 y = geo.y + geo.height - height - 24
+            elif role == OverlayRole.STATUS:
+                y = geo.y + geo.height * 3 // 5
             else:
                 y = geo.y + 16
 
@@ -209,8 +232,8 @@ def _x11_set_input_hint(xid: int) -> None:
             )
 
         window_type = d.intern_atom("_NET_WM_WINDOW_TYPE")
-        notification = d.intern_atom("_NET_WM_WINDOW_TYPE_NOTIFICATION")
-        win.change_property(window_type, Xatom.ATOM, 32, [notification])
+        utility = d.intern_atom("_NET_WM_WINDOW_TYPE_UTILITY")
+        win.change_property(window_type, Xatom.ATOM, 32, [utility])
         d.flush()
     except Exception as e:
         logger.warning("X11 input hint failed: %s", e)
@@ -367,3 +390,45 @@ def x11_button1_down() -> bool:
         logger.warning("X11 query button failed: %s", e)
         _x11_conn = None
         return False
+
+
+def x11_get_geometry(window: Gtk.Window) -> tuple[int, int] | None:
+    """Return the current (x, y) position of an X11 top-level window."""
+    surface = _x11_surface(window)
+    if surface is None:
+        return None
+    global _x11_conn
+    try:
+        from Xlib.display import Display
+
+        if _x11_conn is None:
+            _x11_conn = Display()
+        win = _x11_conn.create_resource_object("window", surface.get_xid())
+        geo = win.get_geometry()
+        return (geo.x, geo.y)
+    except Exception as e:
+        logger.warning("X11 get geometry failed: %s", e)
+        _x11_conn = None
+        return None
+
+
+def using_layer_shell() -> bool:
+    """Return True if gtk4-layer-shell is active."""
+    return _HAS_LAYER_SHELL
+
+
+def layer_shell_get_margins(window: Gtk.Window) -> tuple[int, int]:
+    """Get current (top_margin, left_margin) for a layer-shell window."""
+    if not _HAS_LAYER_SHELL or LayerShell is None:
+        return (0, 0)
+    top = LayerShell.get_margin(window, LayerShell.Edge.TOP)
+    left = LayerShell.get_margin(window, LayerShell.Edge.LEFT)
+    return (top, left)
+
+
+def layer_shell_set_margins(window: Gtk.Window, top: int, left: int) -> None:
+    """Set margins for a layer-shell window (used for drag on Wayland)."""
+    if not _HAS_LAYER_SHELL or LayerShell is None:
+        return
+    LayerShell.set_margin(window, LayerShell.Edge.TOP, top)
+    LayerShell.set_margin(window, LayerShell.Edge.LEFT, left)

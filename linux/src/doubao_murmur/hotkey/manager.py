@@ -32,7 +32,7 @@ class HotkeyManager:
         self._last_keyboard_time = 0.0
 
     def start(
-        self, overlay_button, evdev_listener=None, x11_listener=None
+        self, overlay_button=None, evdev_listener=None, x11_listener=None
     ) -> None:
         """Initialize input backends."""
         self._overlay_button = overlay_button

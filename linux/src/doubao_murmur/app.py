@@ -16,7 +16,6 @@ from doubao_murmur.app_state import AppState, LoginStatus
 from doubao_murmur.hotkey.evdev_listener import EvdevListener
 from doubao_murmur.hotkey.manager import HotkeyManager
 from doubao_murmur.hotkey.x11_listener import X11KeyListener
-from doubao_murmur.hotkey.overlay_button import OverlayButton
 from doubao_murmur.keyboard.keyboard_window import KeyboardWindow
 from doubao_murmur.params_store import ParamsStore
 from doubao_murmur.paste.paste_helper import PasteHelper
@@ -42,7 +41,6 @@ class DoubaoMurmurApp(Gtk.Application):
         self.tray_icon: TrayIcon | None = None
         self.hotkey_manager: HotkeyManager | None = None
         self.transcription_manager: TranscriptionManager | None = None
-        self.ptt_button: OverlayButton | None = None
         self.keyboard: KeyboardWindow | None = None
         self._setup_done = False
 
@@ -84,14 +82,7 @@ class DoubaoMurmurApp(Gtk.Application):
         )
         self.overlay.on_cancel = self.transcription_manager.handle_cancel
 
-        # 4. Create PTT button
-        self.ptt_button = OverlayButton(
-            on_press=self.transcription_manager.handle_toggle,
-            on_cancel=self.transcription_manager.handle_cancel,
-        )
-        self.ptt_button.create()
-
-        # 5. Create hotkey manager
+        # 4. Create hotkey manager
         self.hotkey_manager = HotkeyManager()
         self.hotkey_manager.on_toggle = self.transcription_manager.handle_toggle
         self.hotkey_manager.on_cancel = self.transcription_manager.handle_cancel
@@ -100,7 +91,7 @@ class DoubaoMurmurApp(Gtk.Application):
         # Prefer the X11 listener: it sees both physical keys and
         # XTEST-injected ones (Steam Input desktop layouts inject
         # controller-mapped keys via XTEST, invisible to evdev).
-        # evdev remains the fallback for non-X11 sessions.
+        # evdev runs as a fallback in case X11 listener fails to start.
         x11 = None
         evdev = None
         if X11KeyListener.is_available():
@@ -109,41 +100,22 @@ class DoubaoMurmurApp(Gtk.Application):
                 on_escape=self.hotkey_manager.trigger_cancel,
                 on_keyboard=self.hotkey_manager.trigger_keyboard,
             )
-        elif EvdevListener.is_available():
+        if EvdevListener.is_available():
             evdev = EvdevListener(
                 on_toggle=self.hotkey_manager.trigger_toggle,
                 on_escape=self.hotkey_manager.trigger_cancel,
             )
 
         self.hotkey_manager.start(
-            overlay_button=self.ptt_button,
+            overlay_button=None,
             evdev_listener=evdev,
             x11_listener=x11,
         )
 
-        # Wire PTT button to recording state
-        self.app_state.connect(
-            "recording-state-changed", self._on_recording_state_changed
-        )
-
-        # With a global hotkey available, the PTT button only appears
-        # while recording (it would otherwise cover screen content).
-        # Without one it is the only way to start recording, so keep it
-        # always visible when logged in.
-        if (
-            self.app_state.login_status == LoginStatus.LOGGED_IN
-            and not self.hotkey_manager.has_global_hotkey
-        ):
-            self.ptt_button.show()
-
-        self.app_state.connect(
-            "login-status-changed", self._on_login_status_changed
-        )
-
-        # 6. Create on-screen keyboard (lazily shown via tray)
+        # 5. Create on-screen keyboard (lazily shown via tray)
         self.keyboard = KeyboardWindow()
 
-        # 7. Create tray icon
+        # 6. Create tray icon
         self.tray_icon = TrayIcon(
             app_state=self.app_state,
             on_login_clicked=self._show_login,
@@ -259,26 +231,6 @@ class DoubaoMurmurApp(Gtk.Application):
     def _on_cancel_enabled_changed(self, enabled: bool) -> None:
         if self.hotkey_manager:
             self.hotkey_manager.set_cancel_enabled(enabled)
-
-    def _on_recording_state_changed(self, app_state, state_str: str) -> None:
-        if self.ptt_button:
-            is_recording = state_str in ("starting", "recording", "stopping")
-            self.ptt_button.set_recording_state(is_recording)
-            if self.hotkey_manager and self.hotkey_manager.has_global_hotkey:
-                if is_recording:
-                    self.ptt_button.show()
-                else:
-                    self.ptt_button.hide()
-
-    def _on_login_status_changed(self, app_state, status_str: str) -> None:
-        if self.ptt_button:
-            if status_str != LoginStatus.LOGGED_IN.value:
-                self.ptt_button.hide()
-            elif not (
-                self.hotkey_manager
-                and self.hotkey_manager.has_global_hotkey
-            ):
-                self.ptt_button.show()
 
     def _on_auth_expired(self) -> None:
         """Show re-login dialog."""
