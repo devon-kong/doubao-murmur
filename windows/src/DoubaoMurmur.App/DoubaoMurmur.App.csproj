@@ -45,4 +45,19 @@
     </Content>
   </ItemGroup>
 
+  <!-- WinUI ships localized .mui resources for around 40 languages, roughly 15 MB.
+       They only translate built-in control strings (text box context menus and the
+       like); WinUI falls back to en-US for any language that is absent. -->
+  <Target Name="TrimWinUiLanguageResources" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <ItemGroup>
+      <_MuiFile Include="$(PublishDir)**\*.mui" />
+      <_MuiFileToKeep Include="@(_MuiFile)"
+                      Condition="$([System.String]::new('%(RecursiveDir)').StartsWith('en-US')) Or $([System.String]::new('%(RecursiveDir)').StartsWith('zh-'))" />
+      <_MuiFileToDrop Include="@(_MuiFile)" Exclude="@(_MuiFileToKeep)" />
+    </ItemGroup>
+    <Delete Files="@(_MuiFileToDrop)" ContinueOnError="WarnAndContinue" />
+    <RemoveDir Directories="@(_MuiFileToDrop->'%(RootDir)%(Directory)')" ContinueOnError="WarnAndContinue" />
+    <Message Importance="high" Text="Trimmed @(_MuiFileToDrop->Count()) localized WinUI resource files" />
+  </Target>
+
 </Project>

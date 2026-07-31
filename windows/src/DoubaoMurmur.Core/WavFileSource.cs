@@ -37,8 +37,10 @@ public sealed class WavFileSource : IAudioSource
     {
         try
         {
-            using var reader = new AudioFileReader(_path);
-            ISampleProvider samples = reader;
+            // WaveFileReader rather than AudioFileReader: the latter also handles
+            // mp3/aiff and lives in the NAudio assembly that drags WinForms in.
+            using var reader = new WaveFileReader(_path);
+            ISampleProvider samples = reader.ToSampleProvider();
 
             if (samples.WaveFormat.Channels == 2)
             {
