@@ -14,9 +14,11 @@
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
 
     <UseWinUI>true</UseWinUI>
-    <!-- Unpackaged (plain .exe) deployment. -->
+    <!-- Unpackaged (plain .exe) deployment. EnableMsixTooling stays on even though
+         nothing is packaged: that is the combination the WinUI 3 template ships,
+         and the PRI/resource targets are wired up behind it. -->
     <WindowsPackageType>None</WindowsPackageType>
-    <EnableMsixTooling>false</EnableMsixTooling>
+    <EnableMsixTooling>true</EnableMsixTooling>
     <!-- Ship the Windows App SDK and the .NET runtime with the app so users do not
          have to install either one. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>

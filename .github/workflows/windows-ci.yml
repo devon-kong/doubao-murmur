@@ -42,6 +42,10 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # WinUI 3 needs the AppxPackage/PRI targets, which ship with Visual Studio's
+      # MSBuild rather than the dotnet SDK, so the app is published with msbuild.
+      - uses: microsoft/setup-msbuild@v2
+
       - name: Report SDK
         run: dotnet --version
 
@@ -51,11 +55,19 @@ jobs:
           -c Release
           --logger "console;verbosity=normal"
 
+      - name: Restore app
+        run: >
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
+          /t:Restore /p:Configuration=Release /p:Platform=x64
+          /p:RuntimeIdentifier=win-x64
+
       - name: Publish app
         run: >
-          dotnet publish src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
-          -c Release -r win-x64 -p:Platform=x64 -p:Version=${{ env.APP_VERSION }}
-          -o publish/DoubaoMurmur
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
+          /t:Publish /p:Configuration=Release /p:Platform=x64
+          /p:RuntimeIdentifier=win-x64
+          /p:Version=${{ env.APP_VERSION }}
+          /p:PublishDir=publish\DoubaoMurmur\
 
       - name: Publish diagnostics tool
         run: >

@@ -38,6 +38,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # See windows-ci.yml: the WinUI 3 PRI targets come from Visual Studio's MSBuild.
+      - uses: microsoft/setup-msbuild@v2
+
       - name: Resolve version from tag
         shell: pwsh
         run: |
@@ -53,12 +56,19 @@ jobs:
           dotnet test tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
           -c Release --logger "console;verbosity=normal"
 
+      - name: Restore app
+        run: >
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
+          /t:Restore /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+          /p:RuntimeIdentifier=${{ matrix.rid }}
+
       - name: Publish app
         run: >
-          dotnet publish src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
-          -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
-          -p:Version=${{ env.APP_VERSION }}
-          -o publish/DoubaoMurmur
+          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
+          /t:Publish /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+          /p:RuntimeIdentifier=${{ matrix.rid }}
+          /p:Version=${{ env.APP_VERSION }}
+          /p:PublishDir=publish\DoubaoMurmur\
 
       - name: Publish diagnostics tool
         run: >
