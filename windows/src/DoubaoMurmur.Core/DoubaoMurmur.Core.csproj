@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>DoubaoMurmur.Core</RootNamespace>
+    <AssemblyName>DoubaoMurmur.Core</AssemblyName>
+    <Platforms>AnyCPU;x64;ARM64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Floating versions on purpose: this project is developed without a local
+         Windows/dotnet toolchain, so pinning an exact patch that turns out not
+         to exist would break restore on CI. -->
+    <PackageReference Include="NAudio" Version="2.2.*" />
+  </ItemGroup>
+
+</Project>

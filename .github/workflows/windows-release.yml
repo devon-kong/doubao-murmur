@@ -1,0 +1,96 @@
+name: Windows Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  release:
+    name: Build ${{ matrix.rid }}
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            platform: x64
+          - rid: win-arm64
+            platform: ARM64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve version from tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          if ($version -notmatch '^\d+(\.\d+){0,3}$') { $version = '0.0.0' }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Unit tests
+        if: matrix.rid == 'win-x64'
+        run: >
+          dotnet test windows/tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
+          -c Release --logger "console;verbosity=normal"
+
+      - name: Publish app
+        run: >
+          dotnet publish windows/src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
+          -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
+          -p:Version=${{ env.APP_VERSION }}
+          -o publish/DoubaoMurmur
+
+      - name: Publish diagnostics tool
+        run: >
+          dotnet publish windows/tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
+          -c Release -r ${{ matrix.rid }} --self-contained true
+          -p:Version=${{ env.APP_VERSION }}
+          -o publish/DoubaoMurmur/diag
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found at $iscc"
+          }
+          & $iscc `
+            "/DMyAppVersion=${env:APP_VERSION}" `
+            "/DSourceDir=$pwd\publish\DoubaoMurmur" `
+            "/DOutputDir=$pwd\dist" `
+            "/DOutputName=Doubao-Murmur-Setup-${env:APP_TAG}-${{ matrix.rid }}" `
+            windows\installer\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path publish\DoubaoMurmur\* `
+            -DestinationPath "dist\Doubao-Murmur-${env:APP_TAG}-${{ matrix.rid }}-portable.zip"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.zip
+          generate_release_notes: true

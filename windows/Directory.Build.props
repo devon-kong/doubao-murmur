@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Overridden from CI with the tag version. -->
+    <Version Condition="'$(Version)' == ''">1.0.0</Version>
+    <Authors>lilong7676</Authors>
+    <Product>Doubao Murmur</Product>
+  </PropertyGroup>
+</Project>
