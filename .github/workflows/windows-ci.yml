@@ -28,6 +28,13 @@ jobs:
     name: Build and test (win-x64)
     runs-on: windows-latest
 
+    # windows/global.json pins the SDK to .NET 8: the runner's preinstalled
+    # .NET 10 SDK moved the AppxPackage tooling, which Windows App SDK 1.6 still
+    # looks for at the old path.
+    defaults:
+      run:
+        working-directory: windows
+
     steps:
       - uses: actions/checkout@v4
 
@@ -35,21 +42,24 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Report SDK
+        run: dotnet --version
+
       - name: Unit tests
         run: >
-          dotnet test windows/tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
+          dotnet test tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
           -c Release
           --logger "console;verbosity=normal"
 
       - name: Publish app
         run: >
-          dotnet publish windows/src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
+          dotnet publish src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
           -c Release -r win-x64 -p:Platform=x64 -p:Version=${{ env.APP_VERSION }}
           -o publish/DoubaoMurmur
 
       - name: Publish diagnostics tool
         run: >
-          dotnet publish windows/tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
+          dotnet publish tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
           -c Release -r win-x64 --self-contained true -p:Version=${{ env.APP_VERSION }}
           -o publish/DoubaoMurmur.Diag
 
@@ -68,26 +78,26 @@ jobs:
             "/DSourceDir=$pwd\publish\DoubaoMurmur" `
             "/DOutputDir=$pwd\dist" `
             "/DOutputName=Doubao-Murmur-Setup-dev" `
-            windows\installer\installer.iss
+            installer\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:
           name: DoubaoMurmur-win-x64
-          path: publish/DoubaoMurmur
+          path: windows/publish/DoubaoMurmur
           if-no-files-found: error
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: DoubaoMurmur-installer-win-x64
-          path: dist/*.exe
+          path: windows/dist/*.exe
           if-no-files-found: error
 
       - name: Upload diagnostics tool
         uses: actions/upload-artifact@v4
         with:
           name: DoubaoMurmur-diag-win-x64
-          path: publish/DoubaoMurmur.Diag
+          path: windows/publish/DoubaoMurmur.Diag
           if-no-files-found: error

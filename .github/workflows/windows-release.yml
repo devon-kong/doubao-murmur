@@ -17,6 +17,11 @@ jobs:
     name: Build ${{ matrix.rid }}
     runs-on: windows-latest
 
+    # See windows-ci.yml: windows/global.json pins the SDK to .NET 8.
+    defaults:
+      run:
+        working-directory: windows
+
     strategy:
       fail-fast: false
       matrix:
@@ -45,19 +50,19 @@ jobs:
       - name: Unit tests
         if: matrix.rid == 'win-x64'
         run: >
-          dotnet test windows/tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
+          dotnet test tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
           -c Release --logger "console;verbosity=normal"
 
       - name: Publish app
         run: >
-          dotnet publish windows/src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
+          dotnet publish src/DoubaoMurmur.App/DoubaoMurmur.App.csproj
           -c Release -r ${{ matrix.rid }} -p:Platform=${{ matrix.platform }}
           -p:Version=${{ env.APP_VERSION }}
           -o publish/DoubaoMurmur
 
       - name: Publish diagnostics tool
         run: >
-          dotnet publish windows/tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
+          dotnet publish tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
           -c Release -r ${{ matrix.rid }} --self-contained true
           -p:Version=${{ env.APP_VERSION }}
           -o publish/DoubaoMurmur/diag
@@ -77,7 +82,7 @@ jobs:
             "/DSourceDir=$pwd\publish\DoubaoMurmur" `
             "/DOutputDir=$pwd\dist" `
             "/DOutputName=Doubao-Murmur-Setup-${env:APP_TAG}-${{ matrix.rid }}" `
-            windows\installer\installer.iss
+            installer\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
       - name: Package portable zip
@@ -91,6 +96,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.exe
-            dist/*.zip
+            windows/dist/*.exe
+            windows/dist/*.zip
           generate_release_notes: true
