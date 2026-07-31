@@ -1,8 +1,9 @@
 # Doubao Murmur
 
-通过劫持豆包 Web 版的语音识别能力，实现全局语音输入。支持 **macOS** 和 **Linux / SteamOS**（Steam Deck 等掌机）。
+通过劫持豆包 Web 版的语音识别能力，实现全局语音输入。支持 **macOS**、**Windows** 和 **Linux / SteamOS**（Steam Deck 等掌机）。
 
 - **macOS**：按下右 `⌥ Option` 键开始/停止语音识别，识别结果自动复制到剪贴板并粘贴到当前光标所在的输入框。
+- **Windows**：按下右 `Alt` 键开始/停止，用法与 macOS 一致；托盘菜单里可以把热键换成右 Ctrl / 右 Shift 等。详见 [Windows 版说明](windows/README.md)。
 - **Linux / SteamOS**：按下右 `Alt` 键开始/停止；掌机上可在 Steam Input 桌面布局中把任意手柄按键（如 R3/R2）映射为右 Alt，即可**用手柄一键语音输入**。另外还内置了 **SteamOS 桌面模式的触摸软键盘**——可拖动 / 可缩放，并支持**分体**与**左 / 右单手**布局，方便掌机握持时打字。详见 [Linux 版说明](linux/README.md)。
 
 <p align="center">
@@ -33,6 +34,11 @@
 **macOS**：从 [Releases](../../releases) 页面下载最新版本的 `Doubao-Murmur-vX.X.X.zip`，解压后将 `Doubao Murmur.app` 拖入「应用程序」文件夹即可。
 
 > 要求 macOS 13.0+
+
+**Windows**：从 [Releases](../../releases) 页面下载 `Doubao-Murmur-Setup-vX.X.X-win-x64.exe` 运行即可，安装到当前用户目录，不需要管理员权限。
+
+> 要求 Windows 10 1809+ / Windows 11；未做代码签名，SmartScreen 提示时点「更多信息 → 仍要运行」。
+> 详细说明见 [Windows 版 README](windows/README.md)
 
 **Linux / SteamOS (Steam Deck)**：从 [Releases](../../releases) 页面下载 `doubao-murmur.flatpak`，然后：
 

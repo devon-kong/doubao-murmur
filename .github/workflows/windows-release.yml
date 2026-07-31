@@ -73,12 +73,14 @@ jobs:
             "/p:PublishDir=$pwd\publish\DoubaoMurmur\"
           if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
 
+      # Shipped as its own zip rather than inside the app: it is self-contained too,
+      # and bundling it would double the installer size.
       - name: Publish diagnostics tool
         run: >
           dotnet publish tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
           -c Release -r ${{ matrix.rid }} --self-contained true
           -p:Version=${{ env.APP_VERSION }}
-          -o publish/DoubaoMurmur/diag
+          -o publish/DoubaoMurmur.Diag
 
       - name: Build installer
         shell: pwsh
@@ -98,12 +100,14 @@ jobs:
             installer\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
-      - name: Package portable zip
+      - name: Package portable and diagnostics zips
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path publish\DoubaoMurmur\* `
             -DestinationPath "dist\Doubao-Murmur-${env:APP_TAG}-${{ matrix.rid }}-portable.zip"
+          Compress-Archive -Path publish\DoubaoMurmur.Diag\* `
+            -DestinationPath "dist\Doubao-Murmur-Diag-${env:APP_TAG}-${{ matrix.rid }}.zip"
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
