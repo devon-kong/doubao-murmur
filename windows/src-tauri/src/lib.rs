@@ -26,7 +26,7 @@ mod tray;
 mod updater;
 mod win32;
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{RunEvent, WindowEvent};
 
 use crate::settings::Settings;
 use crate::tray::TrayState;
