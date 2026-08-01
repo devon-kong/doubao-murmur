@@ -35,7 +35,7 @@
 
 > 要求 macOS 13.0+
 
-**Windows**：从 [Releases](../../releases) 页面下载 `Doubao-Murmur-Setup-vX.X.X-win-x64.exe` 运行即可，安装到当前用户目录，不需要管理员权限。
+**Windows**：从 [Releases](../../releases) 页面下载 `Doubao-Murmur-Setup-vX.X.X-x64.exe` 运行即可（约 1.3 MB），安装到当前用户目录，不需要管理员权限。也提供单文件免安装版。
 
 > 要求 Windows 10 1809+ / Windows 11；未做代码签名，SmartScreen 提示时点「更多信息 → 仍要运行」。
 > 详细说明见 [Windows 版 README](windows/README.md)

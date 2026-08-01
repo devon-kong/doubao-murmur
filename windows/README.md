@@ -1,14 +1,13 @@
 # 豆包语音输入 (Doubao Murmur) — Windows 版
 
-原生 C# / .NET 8 + WinUI 3 实现，与 macOS (Swift) 和 Linux (Python) 版共用同一套豆包
-ASR 协议。
+Rust + Tauri v2 实现，与 macOS (Swift) 和 Linux (Python) 版共用同一套豆包 ASR 协议。
 
 > macOS 用户请使用仓库根目录的版本，Linux / SteamOS 用户请看 [`../linux`](../linux)。
 
 ## 功能
 
 - ⌨️ **全局热键**：右 `Alt` 开始 / 停止识别，`ESC` 取消（任意应用中均可用）
-- 📝 **实时转写**：悬浮窗显示识别结果，不抢焦点、不挡输入
+- 📝 **实时转写**：半透明悬浮窗显示识别结果，不抢焦点、不挡输入
 - 📋 **自动粘贴**：识别结果自动复制并粘贴到当前输入框
 - 🔐 **登录一次**：内置 WebView2 登录豆包，凭证保存在本地
 - 🛎 **系统托盘**：常驻托盘图标，可切换热键、开机自启
@@ -16,20 +15,17 @@ ASR 协议。
 ## 系统要求
 
 - Windows 10 1809+ 或 Windows 11（x64 / ARM64）
-- Microsoft Edge WebView2 Runtime（Windows 11 与较新的 Windows 10 已自带；
-  缺失时安装程序会提示下载）
-- 不需要安装 .NET —— 运行时已随程序打包
+- Microsoft Edge WebView2 Runtime（Windows 11 与较新的 Windows 10 已自带）
 
 ## 安装
 
-从 [Releases](../../releases) 下载 `Doubao-Murmur-Setup-vX.Y.Z-win-x64.exe` 并运行。
-
-安装到 `%LOCALAPPDATA%\Programs\Doubao Murmur`，**不需要管理员权限**。
+从 [Releases](../../releases) 下载 `Doubao-Murmur-Setup-vX.Y.Z-x64.exe` 并运行，
+安装到当前用户目录，**不需要管理员权限**。
 
 > 程序未做代码签名，Windows SmartScreen 会提示「已保护你的电脑」。
 > 点击「更多信息 → 仍要运行」即可。
 
-也提供免安装的 `-portable.zip`，解压后直接运行 `DoubaoMurmur.exe`。
+也提供单文件免安装版 `Doubao-Murmur-vX.Y.Z-x64-portable.exe`，直接双击运行。
 
 ## 使用
 
@@ -56,45 +52,59 @@ ASR 协议。
 - **右 Alt 与菜单栏**：部分 Win32 程序里，单击 Alt 会激活菜单栏。可以打开
   「拦截热键」，或把热键改成右 Ctrl。
 
-## 诊断工具
-
-`DoubaoMurmur.Diag` 是一个独立的控制台程序，用来把「豆包连接是否正常」和
-「界面是否接好」这两类问题分开排查：
-
-```powershell
-DoubaoMurmur.Diag params     # 检查本地凭证（不会打印任何 cookie 值）
-DoubaoMurmur.Diag mic 5      # 采集 5 秒麦克风，报告字节数与峰值
-DoubaoMurmur.Diag asr 8      # 用麦克风连接豆包，打印实时识别结果
-DoubaoMurmur.Diag wav a.wav  # 改用 WAV 文件作为音频源
-```
-
-它读取主程序保存的 `%APPDATA%\doubao-murmur\asr_params.json`，所以要先登录一次。
-
 ## 开发
 
 ### 结构
 
 ```
 windows/
-  src/DoubaoMurmur.Core/   协议、状态机、音频、凭证 —— 无 UI 依赖，可单测
-  src/DoubaoMurmur.App/    WinUI 3 外壳 + Win32 互操作（热键、粘贴、托盘、悬浮窗）
-  tools/DoubaoMurmur.Diag/ 控制台诊断工具
-  tests/DoubaoMurmur.Tests/ xUnit
-  installer/installer.iss  Inno Setup 脚本
+  ui/                       静态页面（悬浮窗、帮助），无前端构建链
+  src-tauri/
+    src/
+      config.rs             WSS URL、固定参数、鉴权错误码、路径
+      params.rs             凭证读写（兼容 macOS 的 camelCase 文件）
+      asr.rs                WebSocket 客户端（tokio-tungstenite）
+      audio.rs resample.rs  cpal 采集 + 降混 + 重采样到 16k mono int16
+      controller.rs         状态机：idle → starting → recording → stopping
+      hotkey.rs             WH_KEYBOARD_LL 全局钩子
+      paste.rs              剪贴板 + SendInput
+      login.rs              登录窗口与凭证提取
+      overlay.rs tray.rs help.rs   Tauri 窗口与托盘
+      win32.rs              WS_EX_NOACTIVATE、前台进程、消息框、单实例
+    tauri.conf.json
 ```
 
-`Core` 层刻意不引用任何 `Microsoft.UI.*`：UI 线程调度通过 `IDispatcher` 抽象注入，
-这样状态机可以在没有 WinUI 的情况下被完整测试。
+### 为什么是 Tauri，以及 Tauri 没解决什么
+
+早期版本用 C# / WinUI 3 实现，安装包 42 MB、占盘 160 MB——因为要自带 .NET 运行时、
+WinUI 本身、以及整个 Windows SDK 的 CsWinRT 投影。Tauri 用系统自带的 WebView2，
+安装包降到 **1.3 MB**。
+
+但 Tauri 只替换了外壳。这个应用真正难的部分仍然是手写 Win32：
+
+- `RegisterHotKey`（Tauri 的 global-shortcut 插件用的就是它）**注册不了裸修饰键**，
+  所以 `hotkey.rs` 自己装 `WH_KEYBOARD_LL`，并在独立的消息循环线程上跑
+- 该钩子要过滤 AltGr 合成的伪左 Ctrl，否则 AltGr 布局下 toggle 永不触发
+  （Linux 侧 commit `37098ef` 的 Windows 对应问题）
+- 悬浮窗要在第一次显示前打上 `WS_EX_NOACTIVATE`，否则识别结果会粘到它自己身上
+
+### 登录提参的设计
+
+登录页是 doubao.com，属于远程源，没有 Tauri IPC 桥——给第三方源开桥不划算。
+所以注入脚本把两个 localStorage id、以及「profile 接口确认已登录」这个标记，
+**镜像进一次性的一方 cookie**；宿主再用 `cookies_for_url()` 一次性拿到它们和
+HttpOnly 会话 cookie。
+
+整个握手只依赖一个 Tauri API，不需要 `webview2-com` 的 COM 互操作，
+这是这次移植里最大的风险点，用这种方式绕开了。
 
 ### 构建
 
 ```powershell
-dotnet test    windows/tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
-dotnet publish windows/src/DoubaoMurmur.App/DoubaoMurmur.App.csproj `
-  -c Release -r win-x64 -p:Platform=x64 -o publish/DoubaoMurmur
+cargo test --manifest-path windows/src-tauri/Cargo.toml
+npm install -g @tauri-apps/cli@^2
+cd windows; tauri build
 ```
-
-WinUI 3 没有 AnyCPU 配置，必须显式指定 `-p:Platform=x64`（或 `ARM64`）。
 
 CI 在每次 push 时构建并上传产物，见
 [`windows-ci.yml`](../.github/workflows/windows-ci.yml)。
@@ -102,15 +112,14 @@ CI 在每次 push 时构建并上传产物，见
 ### 与其他平台保持一致
 
 豆包的接口会变，历史上的热修（`samantha_web_web_id` 改名、AltGr、终端检测）都发生在
-协议层。目前有 Swift / Python / C# 三份实现，改动协议相关的东西时**三处都要同步**：
+协议层。目前有 Swift / Python / Rust 三份实现，改动协议相关的东西时**三处都要同步**：
 
 | 关注点 | macOS | Linux | Windows |
 |---|---|---|---|
-| WSS URL 与固定参数 | `DoubaoASRClient.swift` | `config.py` | `Core/AppConfig.cs` |
-| 凭证提取 | `WebViewManager.swift` | `ui/login_window.py` | `UI/LoginWindow.xaml.cs` |
-| 状态机 | `TranscriptionManager.swift` | `transcription.py` | `Core/TranscriptionManager.cs` |
-| 注入脚本 | `Resources/inject-*.js` | `resources/inject-*.js` | `Assets/inject-*.js` |
+| WSS URL 与固定参数 | `DoubaoASRClient.swift` | `config.py` | `src/config.rs` |
+| 凭证提取 | `WebViewManager.swift` | `ui/login_window.py` | `src/login.rs` |
+| 状态机 | `TranscriptionManager.swift` | `transcription.py` | `src/controller.rs` |
+| 注入脚本 | `Resources/inject-*.js` | `resources/inject-*.js` | `src/login.rs` 内的 `INIT_SCRIPT` |
 
-注入脚本三处内容相同，Windows 侧在加载时把 WKWebView 的
-`window.webkit.messageHandlers...` 桥接替换成 WebView2 的
-`window.chrome.webview.postMessage`，以免脚本本身分叉。
+Windows 的注入脚本没有复用另两个平台的文件：它们的登录检测靠 `postMessage` 回传宿主，
+而这里改用 cookie 通道，逻辑不同。`/alice/profile/self` 的判定条件三处保持一致。
