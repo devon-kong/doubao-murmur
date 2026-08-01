@@ -1,6 +1,4 @@
-bin/
-obj/
-publish/
+target/
 dist/
+gen/
 *.user
-.vs/

@@ -9,15 +9,13 @@ permissions:
   contents: write
 
 env:
-  DOTNET_NOLOGO: 'true'
-  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  CARGO_TERM_COLOR: always
 
 jobs:
   release:
-    name: Build ${{ matrix.rid }}
+    name: Build ${{ matrix.arch }}
     runs-on: windows-latest
 
-    # See windows-ci.yml: windows/global.json pins the SDK to .NET 8.
     defaults:
       run:
         working-directory: windows
@@ -26,93 +24,68 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - rid: win-x64
-            platform: x64
-          - rid: win-arm64
-            platform: ARM64
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          dotnet-version: '8.0.x'
+          targets: ${{ matrix.target }}
 
-      # See windows-ci.yml: the WinUI 3 PRI targets come from Visual Studio's MSBuild.
-      - uses: microsoft/setup-msbuild@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows/src-tauri
+          key: ${{ matrix.target }}
 
-      - name: Resolve version from tag
+      - name: Stamp the version from the tag
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag -replace '^v', ''
-          if ($version -notmatch '^\d+(\.\d+){0,3}$') { $version = '0.0.0' }
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { $version = '0.0.0' }
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "APP_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $config.version = $version
+          $config | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.conf.json
+
+          # Cargo.toml drives the version the update check compares against.
+          $cargo = Get-Content src-tauri/Cargo.toml -Raw
+          $cargo = $cargo -replace '(?m)^version = "[^"]*"', "version = ""$version"""
+          Set-Content src-tauri/Cargo.toml $cargo
 
       - name: Unit tests
-        if: matrix.rid == 'win-x64'
-        run: >
-          dotnet test tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
-          -c Release --logger "console;verbosity=normal"
+        if: matrix.arch == 'x64'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Restore app
-        run: >
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
-          /t:Restore /p:Configuration=Release /p:Platform=${{ matrix.platform }}
-          /p:RuntimeIdentifier=${{ matrix.rid }}
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
 
-      # PublishDir is resolved relative to the project, not the working directory.
-      - name: Publish app
-        shell: pwsh
-        run: |
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj `
-            /t:Publish /p:Configuration=Release /p:Platform=${{ matrix.platform }} `
-            /p:RuntimeIdentifier=${{ matrix.rid }} `
-            /p:Version=${env:APP_VERSION} `
-            "/p:PublishDir=$pwd\publish\DoubaoMurmur\"
-          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
+      - name: Build bundle
+        run: tauri build --target ${{ matrix.target }}
 
-      # Shipped as its own zip rather than inside the app: it is self-contained too,
-      # and bundling it would double the installer size.
-      - name: Publish diagnostics tool
-        run: >
-          dotnet publish tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
-          -c Release -r ${{ matrix.rid }} --self-contained true
-          -p:Version=${{ env.APP_VERSION }}
-          -o publish/DoubaoMurmur.Diag
-
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-          }
-          if (-not (Test-Path $iscc)) {
-            throw "Inno Setup compiler not found at $iscc"
-          }
-          & $iscc `
-            "/DMyAppVersion=${env:APP_VERSION}" `
-            "/DSourceDir=$pwd\publish\DoubaoMurmur" `
-            "/DOutputDir=$pwd\dist" `
-            "/DOutputName=Doubao-Murmur-Setup-${env:APP_TAG}-${{ matrix.rid }}" `
-            installer\installer.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-
-      - name: Package portable and diagnostics zips
+      - name: Collect artefacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path publish\DoubaoMurmur\* `
-            -DestinationPath "dist\Doubao-Murmur-${env:APP_TAG}-${{ matrix.rid }}-portable.zip"
-          Compress-Archive -Path publish\DoubaoMurmur.Diag\* `
-            -DestinationPath "dist\Doubao-Murmur-Diag-${env:APP_TAG}-${{ matrix.rid }}.zip"
+          $tag = "${{ github.ref_name }}"
+          $arch = "${{ matrix.arch }}"
+          $base = "src-tauri/target/${{ matrix.target }}/release"
+
+          Get-ChildItem -Path "$base/bundle/nsis" -Filter *.exe | ForEach-Object {
+            Copy-Item $_.FullName "dist/Doubao-Murmur-Setup-$tag-$arch.exe"
+          }
+          Copy-Item "$base/doubao-murmur.exe" "dist/Doubao-Murmur-$tag-$arch-portable.exe"
+
+          Get-ChildItem dist | ForEach-Object {
+            "{0,10:N2} MB  {1}" -f ($_.Length / 1MB), $_.Name
+          }
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            windows/dist/*.exe
-            windows/dist/*.zip
+          files: windows/dist/*
           generate_release_notes: true

@@ -19,18 +19,13 @@ permissions:
   contents: read
 
 env:
-  APP_VERSION: 0.0.0
-  DOTNET_NOLOGO: 'true'
-  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    name: Build and test (win-x64)
+    name: Build and test (x64)
     runs-on: windows-latest
 
-    # windows/global.json pins the SDK to .NET 8: the runner's preinstalled
-    # .NET 10 SDK moved the AppxPackage tooling, which Windows App SDK 1.6 still
-    # looks for at the old path.
     defaults:
       run:
         working-directory: windows
@@ -38,82 +33,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          dotnet-version: '8.0.x'
-
-      # WinUI 3 needs the AppxPackage/PRI targets, which ship with Visual Studio's
-      # MSBuild rather than the dotnet SDK, so the app is published with msbuild.
-      - uses: microsoft/setup-msbuild@v2
-
-      - name: Report SDK
-        run: dotnet --version
+          workspaces: windows/src-tauri
 
       - name: Unit tests
-        run: >
-          dotnet test tests/DoubaoMurmur.Tests/DoubaoMurmur.Tests.csproj
-          -c Release
-          --logger "console;verbosity=normal"
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Restore app
-        run: >
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj
-          /t:Restore /p:Configuration=Release /p:Platform=x64
-          /p:RuntimeIdentifier=win-x64
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
 
-      # PublishDir is resolved relative to the project, not the working directory,
-      # so it has to be absolute to land where the later steps look for it.
-      - name: Publish app
+      - name: Build bundle
+        run: tauri build
+
+      - name: Report artefact sizes
         shell: pwsh
         run: |
-          msbuild src\DoubaoMurmur.App\DoubaoMurmur.App.csproj `
-            /t:Publish /p:Configuration=Release /p:Platform=x64 `
-            /p:RuntimeIdentifier=win-x64 `
-            /p:Version=${env:APP_VERSION} `
-            "/p:PublishDir=$pwd\publish\DoubaoMurmur\"
-          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
-
-      - name: Publish diagnostics tool
-        run: >
-          dotnet publish tools/DoubaoMurmur.Diag/DoubaoMurmur.Diag.csproj
-          -c Release -r win-x64 --self-contained true -p:Version=${{ env.APP_VERSION }}
-          -o publish/DoubaoMurmur.Diag
-
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-          }
-          if (-not (Test-Path $iscc)) {
-            throw "Inno Setup compiler not found at $iscc"
-          }
-          & $iscc `
-            "/DMyAppVersion=${env:APP_VERSION}" `
-            "/DSourceDir=$pwd\publish\DoubaoMurmur" `
-            "/DOutputDir=$pwd\dist" `
-            "/DOutputName=Doubao-Murmur-Setup-dev" `
-            installer\installer.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-
-      - name: Upload app
-        uses: actions/upload-artifact@v4
-        with:
-          name: DoubaoMurmur-win-x64
-          path: windows/publish/DoubaoMurmur
-          if-no-files-found: error
+          Get-ChildItem -Recurse -File `
+            -Path src-tauri/target/release/doubao-murmur.exe,
+                  src-tauri/target/release/bundle |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            ForEach-Object {
+              "{0,10:N2} MB  {1}" -f ($_.Length / 1MB), $_.Name
+            }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: DoubaoMurmur-installer-win-x64
-          path: windows/dist/*.exe
+          name: DoubaoMurmur-installer-x64
+          path: windows/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
-      - name: Upload diagnostics tool
+      - name: Upload portable executable
         uses: actions/upload-artifact@v4
         with:
-          name: DoubaoMurmur-diag-win-x64
-          path: windows/publish/DoubaoMurmur.Diag
+          name: DoubaoMurmur-portable-x64
+          path: windows/src-tauri/target/release/doubao-murmur.exe
           if-no-files-found: error
