@@ -25,6 +25,16 @@
   <url type="homepage">https://github.com/lilong7676/doubao-murmur</url>
   <developer_name>lilong7676</developer_name>
   <releases>
+    <release version="1.5.1-beta.1" date="2026-08-02" type="development">
+      <description>
+        <p>Fixes the global hotkey on Wayland sessions. The sandbox was never
+           granted /dev/input, so the evdev listener could not start; on Wayland
+           that is the only backend that works, because the preferred X11
+           listener cannot see keys sent to native Wayland windows. Auto-paste
+           on Wayland still requires ydotool; without it the transcription is
+           copied to the clipboard and can be pasted manually.</p>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-08-02">
       <description>
         <p>Adds a native Windows build alongside macOS and Linux. No changes to

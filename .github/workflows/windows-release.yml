@@ -16,6 +16,13 @@ jobs:
     name: Build ${{ matrix.arch }}
     runs-on: windows-latest
 
+    # Skip prerelease tags (v1.5.1-beta.1). The version stamp below only
+    # accepts x.y.z and silently falls back to 0.0.0 otherwise, which would
+    # ship an installer whose update check compares against nothing. Betas so
+    # far have been Linux-only; when Windows needs one, teach the stamp about
+    # prerelease versions rather than dropping this guard.
+    if: "!contains(github.ref_name, '-')"
+
     defaults:
       run:
         working-directory: windows
