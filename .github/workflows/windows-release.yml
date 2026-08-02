@@ -22,6 +22,9 @@ jobs:
 
     strategy:
       fail-fast: false
+      # Serialised: the two jobs both publish to the same GitHub release, and
+      # concurrent create-or-update calls race.
+      max-parallel: 1
       matrix:
         include:
           - arch: x64
