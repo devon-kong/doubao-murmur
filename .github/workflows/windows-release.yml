@@ -1,0 +1,94 @@
+name: Windows Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build ${{ matrix.arch }}
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: windows
+
+    strategy:
+      fail-fast: false
+      # Serialised: the two jobs both publish to the same GitHub release, and
+      # concurrent create-or-update calls race.
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows/src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Stamp the version from the tag
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { $version = '0.0.0' }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $config.version = $version
+          $config | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.conf.json
+
+          # Cargo.toml drives the version the update check compares against.
+          $cargo = Get-Content src-tauri/Cargo.toml -Raw
+          $cargo = $cargo -replace '(?m)^version = "[^"]*"', "version = ""$version"""
+          Set-Content src-tauri/Cargo.toml $cargo
+
+      - name: Unit tests
+        if: matrix.arch == 'x64'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build bundle
+        run: tauri build --target ${{ matrix.target }}
+
+      - name: Collect artefacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $tag = "${{ github.ref_name }}"
+          $arch = "${{ matrix.arch }}"
+          $base = "src-tauri/target/${{ matrix.target }}/release"
+
+          Get-ChildItem -Path "$base/bundle/nsis" -Filter *.exe | ForEach-Object {
+            Copy-Item $_.FullName "dist/Doubao-Murmur-Setup-$tag-$arch.exe"
+          }
+          Copy-Item "$base/doubao-murmur.exe" "dist/Doubao-Murmur-$tag-$arch-portable.exe"
+
+          Get-ChildItem dist | ForEach-Object {
+            "{0,10:N2} MB  {1}" -f ($_.Length / 1MB), $_.Name
+          }
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: windows/dist/*
+          generate_release_notes: true

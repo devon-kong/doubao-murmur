@@ -1,0 +1,74 @@
+name: Windows Build
+
+# Produces a runnable build for every push. The maintainer has no local Windows
+# toolchain, so CI is both the compiler and the way test builds are delivered.
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-*.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and test (x64)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows/src-tauri
+
+      - name: Unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build bundle
+        run: tauri build
+
+      - name: Report artefact sizes
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -File `
+            -Path src-tauri/target/release/doubao-murmur.exe,
+                  src-tauri/target/release/bundle |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            ForEach-Object {
+              "{0,10:N2} MB  {1}" -f ($_.Length / 1MB), $_.Name
+            }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoubaoMurmur-installer-x64
+          path: windows/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoubaoMurmur-portable-x64
+          path: windows/src-tauri/target/release/doubao-murmur.exe
+          if-no-files-found: error

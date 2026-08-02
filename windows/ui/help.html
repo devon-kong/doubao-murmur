@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>使用帮助</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      body {
+        margin: 0;
+        padding: 28px 32px 40px;
+        font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.75;
+        color: #1f1f1f;
+        background: #fff;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e6e6e6;
+          background: #1f1f1f;
+        }
+        h2 {
+          color: #fff;
+        }
+        kbd {
+          background: #333;
+          border-color: #555;
+          color: #eee;
+        }
+        .note {
+          background: #2a2a2a;
+        }
+      }
+
+      h1 {
+        margin: 0 0 20px;
+        font-size: 20px;
+      }
+
+      h2 {
+        margin: 24px 0 8px;
+        font-size: 15px;
+      }
+
+      ol,
+      ul {
+        margin: 0;
+        padding-left: 22px;
+      }
+
+      kbd {
+        display: inline-block;
+        padding: 1px 7px;
+        border: 1px solid #ccc;
+        border-bottom-width: 2px;
+        border-radius: 5px;
+        background: #f5f5f5;
+        font-family: inherit;
+        font-size: 13px;
+      }
+
+      .note {
+        margin-top: 10px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: #f4f4f4;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>使用帮助</h1>
+
+    <h2>快捷键</h2>
+    <ul>
+      <li><kbd id="key">右 Alt</kbd>：开始 / 停止语音识别</li>
+      <li><kbd>ESC</kbd>：取消当前识别（不复制、不粘贴）</li>
+    </ul>
+
+    <h2>使用流程</h2>
+    <ol>
+      <li>托盘菜单显示「状态：已登录」</li>
+      <li>把光标放到任意输入框</li>
+      <li>按一下 <kbd class="key">右 Alt</kbd>，屏幕顶部出现悬浮窗，开始说话</li>
+      <li>悬浮窗实时显示识别到的文字</li>
+      <li>再按一下 <kbd class="key">右 Alt</kbd> 结束，文字自动复制并粘贴到输入框</li>
+    </ol>
+
+    <h2>托盘菜单</h2>
+    <ul>
+      <li><b>触发热键</b>：换成右 Ctrl / 右 Shift / Scroll Lock / Pause</li>
+      <li>
+        <b>拦截热键</b>：让焦点窗口收不到该键，可避免按右 Alt 时唤出菜单栏。
+        但会同时禁用 AltGr，欧洲键盘布局请勿开启。
+      </li>
+      <li><b>开机自启</b>：写入当前用户的启动项，不需要管理员权限</li>
+      <li><b>打开日志</b>：出问题时先看这里</li>
+    </ul>
+
+    <h2>已知限制</h2>
+    <div class="note">
+      焦点在以管理员身份运行的窗口（任务管理器、管理员终端等）时，Windows 的 UIPI
+      机制会让本程序既收不到按键、也粘贴不进去。需要在这类窗口里使用时，请同样以
+      管理员身份运行本程序。
+    </div>
+
+    <h2>悬浮窗</h2>
+    <p>
+      可以拖动，位置会被记住。它不会抢占焦点，所以识别结果始终粘贴到你原来的输入框。
+    </p>
+
+    <script>
+      const name = window.__DM_KEY || "右 Alt";
+      document.getElementById("key").textContent = name;
+      document.querySelectorAll(".key").forEach((node) => (node.textContent = name));
+    </script>
+  </body>
+</html>

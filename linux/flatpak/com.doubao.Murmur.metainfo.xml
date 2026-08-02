@@ -24,6 +24,13 @@
   <url type="homepage">https://github.com/lilong7676/doubao-murmur</url>
   <developer_name>lilong7676</developer_name>
   <releases>
+    <release version="1.5.0" date="2026-08-02">
+      <description>
+        <p>Adds a native Windows build alongside macOS and Linux. No changes to
+           the Linux app itself; the version is bumped so all three platforms
+           ship under one release tag.</p>
+      </description>
+    </release>
     <release version="1.4.5" date="2026-06-13">
       <description>
         <p>Auto-paste into the Warp terminal: its window class

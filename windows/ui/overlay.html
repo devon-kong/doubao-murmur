@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Doubao Murmur</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        cursor: default;
+        user-select: none;
+        font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+      }
+
+      #bar {
+        box-sizing: border-box;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 0 22px;
+        /* Matches the Linux overlay: rgba(30, 30, 30, 0.95) with a hairline edge. */
+        background: rgba(30, 30, 30, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 14px;
+      }
+
+      #dot {
+        flex: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #8a8a8a;
+      }
+
+      #dot.live {
+        background: #ff5f57;
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+
+      #text {
+        flex: 1;
+        color: #fff;
+        font-size: 15px;
+        line-height: 1.4;
+        /* Five lines, matching OVERLAY_MAX_LINES on the other platforms. */
+        max-height: 105px;
+        overflow: hidden;
+        word-break: break-word;
+      }
+
+      #text.error {
+        color: #ff6666;
+      }
+
+      #text.waiting {
+        color: rgba(255, 255, 255, 0.6);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="bar" data-tauri-drag-region>
+      <div id="dot"></div>
+      <div id="text" class="waiting">正在聆听…</div>
+    </div>
+
+    <script>
+      const dot = document.getElementById("dot");
+      const text = document.getElementById("text");
+
+      function apply(state) {
+        const body = state && state.text ? state.text : "";
+        text.textContent = body || "正在聆听…";
+        text.classList.toggle("error", !!(state && state.error));
+        text.classList.toggle("waiting", !body);
+        dot.classList.toggle("live", !!(state && state.recording && !state.error));
+      }
+
+      if (window.__TAURI__) {
+        window.__TAURI__.event.listen("overlay-state", (event) => apply(event.payload));
+      }
+    </script>
+  </body>
+</html>
