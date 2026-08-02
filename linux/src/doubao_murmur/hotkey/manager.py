@@ -1,8 +1,17 @@
 """Hotkey manager: coordinates input methods for triggering recording.
 
-On Wayland, global hotkeys are restricted. We use:
-1. PRIMARY: Always-on-top GTK push-to-talk button (OverlayButton)
-2. OPTIONAL: evdev /dev/input listener (requires input group)
+Two backends, both started when available:
+1. X11/XRecord (x11_listener) — preferred, and the only one that sees
+   Steam Input's XTEST-injected controller keys.
+2. evdev /dev/input (evdev_listener) — needs the `input` group, plus
+   --device=input when sandboxed. The only one that works on a Wayland
+   session, where keys sent to native Wayland windows never reach
+   XWayland and are therefore invisible to XRecord.
+
+`overlay_button` is vestigial: the on-screen push-to-talk button was
+removed in 6555ffa and app.py passes None. Reviving it would give Wayland
+users a trigger that needs no /dev/input access at all — see
+hotkey/overlay_button.py.
 """
 
 from __future__ import annotations

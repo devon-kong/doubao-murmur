@@ -17,6 +17,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The bundle reports whatever version the appstream metainfo declares,
+      # not the tag. v1.4.6-beta.1 was cut without bumping either file, so it
+      # installed and announced itself as 1.4.5 (issue #7). Fail in seconds
+      # rather than publish a mislabelled bundle 20 minutes later.
+      - name: Check the tag matches the declared version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+
+          declared=$(sed -n '/^\[project\]/,/^\[/p' linux/pyproject.toml \
+                     | sed -n 's/^version = "\(.*\)"$/\1/p')
+          if [ "$declared" != "$version" ]; then
+            echo "::error::linux/pyproject.toml declares '$declared' but the tag is '$version'."
+            exit 1
+          fi
+
+          metainfo=linux/flatpak/com.doubao.Murmur.metainfo.xml
+          newest=$(sed -n 's/.*<release version="\([^"]*\)".*/\1/p' "$metainfo" | head -1)
+          if [ "$newest" != "$version" ]; then
+            echo "::error::$metainfo's newest <release> is '$newest' but the tag is '$version'."
+            echo "::error::Add a <release version=\"$version\" date=\"...\"> entry at the top of <releases>."
+            exit 1
+          fi
+
+          echo "Tag, pyproject and metainfo all agree on $version."
+
       - name: Build bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
