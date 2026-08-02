@@ -57,3 +57,7 @@ jobs:
         with:
           files: doubao-murmur.flatpak
           generate_release_notes: true
+          # Set explicitly in every workflow that touches the release: they
+          # all update the same object, and one leaving it unset can flip a
+          # beta back to a full release depending on job order.
+          prerelease: ${{ contains(github.ref_name, '-') }}
