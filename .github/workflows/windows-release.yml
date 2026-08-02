@@ -56,8 +56,18 @@ jobs:
           $config | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.conf.json
 
           # Cargo.toml drives the version the update check compares against.
+          # Only the first match may be replaced: [dependencies.windows] also has
+          # a line-initial `version = "..."`, and rewriting it asks cargo for a
+          # windows crate release that does not exist.
           $cargo = Get-Content src-tauri/Cargo.toml -Raw
-          $cargo = $cargo -replace '(?m)^version = "[^"]*"', "version = ""$version"""
+          $pattern = [regex]'(?m)^version = "[^"]*"'
+          $cargo = $pattern.Replace($cargo, "version = ""$version""", 1)
+
+          $escaped = [regex]::Escape($version)
+          if ($cargo -match "(?ms)\[dependencies\.windows\].*?^version = ""$escaped""") {
+            throw "Version stamping clobbered the windows crate version"
+          }
+
           Set-Content src-tauri/Cargo.toml $cargo
 
       - name: Unit tests
