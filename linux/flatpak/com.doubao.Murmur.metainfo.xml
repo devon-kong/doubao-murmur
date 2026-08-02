@@ -11,13 +11,14 @@
     <p>
       Doubao Murmur is a voice-to-text input tool that uses Doubao's ASR
       (Automatic Speech Recognition) service to convert speech to text in
-      real-time. It works as a global overlay with a push-to-talk button,
-      making it easy to dictate text into any application.
+      real-time. Press the right Alt key to start dictating from anywhere;
+      the transcription appears in a floating overlay and is pasted into
+      whatever application had focus.
     </p>
     <p xml:lang="zh_CN">
       豆包语音输入是一款语音转文字工具，使用豆包的 ASR（自动语音识别）服务
-      实时将语音转换为文字。它以全局悬浮窗的形式工作，提供一键录音按钮，
-      可以轻松地将文字输入到任何应用中。
+      实时将语音转换为文字。在任意应用中按下右 Alt 键即可开始说话，识别结果
+      显示在悬浮窗中，结束后自动粘贴回原来的输入框。
     </p>
   </description>
   <launchable type="desktop-id">com.doubao.Murmur.desktop</launchable>

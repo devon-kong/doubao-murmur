@@ -1,7 +1,9 @@
 """Always-on-top push-to-talk button (GTK4).
 
-This is the PRIMARY input method on Wayland because global hotkeys are
-restricted by the compositor security model.
+CURRENTLY UNUSED. Removed from the UI in 6555ffa as Steam-Deck-specific
+clutter on a desktop; app.py passes overlay_button=None. Kept because it is
+the one trigger that works on a Wayland session without /dev/input access —
+if Wayland support is taken further, start here.
 
 Design:
 - Positioned at bottom-center of screen (near game UI on Steam Deck)

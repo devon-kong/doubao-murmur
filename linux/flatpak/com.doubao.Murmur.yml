@@ -14,6 +14,16 @@ finish-args:
   - --share=ipc
   - --device=dri
 
+  # Global hotkey. The X11/XRecord listener is preferred, but it only sees
+  # keys that reach XWayland — on a Wayland session (GNOME) keys going to
+  # native Wayland windows never do, so the evdev listener is the only
+  # working path there and it needs /dev/input.
+  #
+  # This is raw keyboard access, i.e. the sandbox can see every keystroke.
+  # It is what a global hotkey costs; the host still gates it on the user
+  # being in the `input` group, so it is not granted silently.
+  - --device=input
+
   # Audio (microphone via PulseAudio compat layer over PipeWire)
   - --socket=pulseaudio
 

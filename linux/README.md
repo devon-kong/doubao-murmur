@@ -6,7 +6,7 @@
 
 ## ✨ 功能
 
-- ⌨️ **全局热键**: 右 `Alt` 开始/停止录音，`ESC` 取消（任何应用中均可用）
+- ⌨️ **全局热键**: 右 `Alt` 开始/停止录音，`ESC` 取消（X11 桌面下任何应用均可用；Wayland 见 [下文](#-wayland--gnome-用户须知)）
 - 🎮 **手柄一键语音输入**: 在 Steam Input 桌面布局中把手柄按键映射为右 Alt 即可（见下文）
 - 📝 **实时转写**: 说话时文字实时显示在屏幕顶部悬浮条中（不抢焦点、不挡输入）
 - 📋 **自动粘贴**: 识别结果自动粘贴到当前输入框；终端自动改用 `Ctrl+Shift+V`
@@ -43,6 +43,7 @@ SteamOS 桌面模式自带的虚拟键盘不能移动、不能缩放，常挡住
 - **音频**: PipeWire (SteamOS 默认) 或 PulseAudio
 - **Python**: 3.11+
 - **桌面环境**: KDE Plasma (推荐) 或 GNOME
+- **显示协议**: **X11 会话开箱即用**；Wayland 会话需要额外配置且功能受限，见 [下文](#-wayland--gnome-用户须知)
 
 ## 🚀 安装
 
@@ -58,6 +59,9 @@ flatpak run com.doubao.Murmur
 WebKitGTK 等依赖打包在 GNOME runtime 中，**不受 SteamOS 系统更新影响**。
 
 自动粘贴依赖宿主机的 `xdotool`（SteamOS 自带）。
+
+> **Wayland 桌面（GNOME 等）还需要把自己加进 `input` 组并重新登录**，
+> 否则热键不工作。详见 [Wayland / GNOME 用户须知](#-wayland--gnome-用户须知)。
 
 也可以从源码自行构建：
 
@@ -91,7 +95,10 @@ PYTHONPATH=src .venv/bin/python -m doubao_murmur
 3. 将光标放到任意输入框，按 **右 Alt**，屏幕顶部出现悬浮条，开始说话
 4. 悬浮条实时显示识别文字（超长时自动滚动显示最新内容）
 5. 再按一次 **右 Alt** 结束，文字自动粘贴到输入框
-6. 录音期间屏幕底部会出现 ⏹ 按钮，点击它也可以停止
+6. 想中途放弃按 `ESC`，不复制也不粘贴
+
+> 悬浮条本身只显示文字，没有按钮 —— 早期版本那个屏幕底部的 ⏹ 一键录音按钮
+> 已在 v1.4.6 移除。开始和结束都只能用热键。
 
 ### 快捷键
 
@@ -110,6 +117,57 @@ PYTHONPATH=src .venv/bin/python -m doubao_murmur
 
 之后在任何应用里按 R3 即可开始/结束语音输入。应用通过 X11 层（XRecord）监听按键，
 Steam 注入的按键和物理键盘都能识别，无需额外权限。
+
+## ⚠️ Wayland / GNOME 用户须知
+
+本项目最初是为 SteamOS 的 KDE Plasma（X11）写的，**在 Wayland 会话下功能受限**。
+Fedora Silverblue / Bluefin、Ubuntu 22.10+、Fedora Workstation 等默认 GNOME Wayland
+的系统都属于这一类。
+
+**为什么右 Alt 没反应**
+
+- 默认的按键监听走 X11 的 XRecord 扩展。Wayland 会话下应用跑在 XWayland 里，
+  XRecord 只能看到送进 XWayland 的按键 —— 焦点在原生 Wayland 窗口时，按键
+  压根不经过 XWayland，所以监听不到。
+- 后备的 evdev 监听读 `/dev/input/event*`，需要额外授权（见下）。
+
+**让热键能用**
+
+```bash
+# 1. 加入 input 组（读 /dev/input 需要），之后必须注销重新登录
+sudo usermod -aG input "$USER"
+
+# 2. Flatpak 用户：v1.5.0 之后的包已内置 --device=input，无需操作。
+#    v1.5.0 及更早的版本手动放开：
+flatpak override --user --device=input com.doubao.Murmur
+```
+
+重新登录后启动应用，日志里出现 `evdev listener active` 就说明通了。
+
+**自动粘贴仍然不行**
+
+粘贴依赖 `xdotool`（X11 专用）或 `ydotool`（需要 `ydotoold` 常驻）。
+Wayland 下 xdotool 粘不进原生窗口；装了 ydotool 并启动 `ydotoold` 才能自动粘贴：
+
+```bash
+sudo systemctl enable --now ydotoold
+```
+
+**没装 ydotool 也能用** —— 文字始终会复制到剪贴板，手动 `Ctrl+V` 即可
+（终端里是 `Ctrl+Shift+V`）。
+
+> Fedora Silverblue / Bluefin 这类原子系统装 ydotool 要 `rpm-ostree install` 加重启，
+> 代价较大，建议直接用手动粘贴。
+
+**托盘图标看不到**
+
+原版 GNOME 不支持 StatusNotifierItem，需要装
+[AppIndicator 扩展](https://extensions.gnome.org/extension/615/appindicator-support/)。
+Bluefin 等定制版默认带这个扩展。没有托盘时，再执行一次
+`flatpak run com.doubao.Murmur` 会唤出控制面板（单实例应用）。
+
+**彻底的 Wayland 支持**（全局热键走 XDG GlobalShortcuts portal 或 libei、
+粘贴走 wtype/libei）尚未实现，欢迎 PR。
 
 ## 🏗 项目结构
 
@@ -159,6 +217,13 @@ rm ~/.config/doubao-murmur/asr_params.json
 - 已登录时应用驻留系统托盘，查看右下角是否有 🎤 图标，按右 Alt 即可录音
 - 点击托盘图标或再启动一次应用（单实例）可打开控制面板
 - 桌面不支持托盘（如原版 GNOME）时没有图标，功能不受影响
+- 界面上**没有**麦克风按钮，开始录音只能按右 Alt
+
+### 按右 Alt 没反应
+- Wayland 会话（GNOME 默认）需要额外配置，见 [Wayland / GNOME 用户须知](#-wayland--gnome-用户须知)
+- X11 会话下从终端启动看日志：`flatpak run com.doubao.Murmur`，
+  应该出现 `X11 key listener active` 或 `evdev listener active`，两条都没有就是监听没起来
+- 键盘布局没有右 Alt（只有 AltGr）时也能触发，但如果 AltGr 被输入法占用则可能失效
 
 ### 没有声音/录音失败
 - 检查麦克风权限: `arecord -l` 查看可用设备
