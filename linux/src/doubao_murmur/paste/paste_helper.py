@@ -3,9 +3,10 @@
 Mirrors PasteHelper.swift.
 
 Methods (in priority order):
-1. wl-copy (Wayland clipboard) + ydotool (paste simulation)
-2. xclip/xsel (X11 clipboard) + xdotool (X11 paste simulation)
-3. GTK clipboard API as last resort
+1. wl-copy (Wayland clipboard) + uinput (kernel-level paste simulation)
+2. ydotool/wtype (paste simulation)
+3. xclip/xsel (X11 clipboard) + xdotool (X11 paste simulation)
+4. GTK clipboard API as last resort
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import time
 
 from doubao_murmur.config import PASTE_DELAY
 from doubao_murmur.host_tools import command_candidates
+from doubao_murmur.paste.uinput_injector import UinputPaster
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,15 @@ class PasteHelper:
         Terminals use Ctrl+Shift+V; everything else uses Ctrl+V.
         """
         use_shift = PasteHelper._focused_window_is_terminal()
+
+        # Try uinput first: kernel-level injection that works on both
+        # Wayland and X11 with no external tools. Gated on /dev/uinput
+        # write access (SteamOS grants it; most distros do not by default).
+        if UinputPaster.is_available():
+            if UinputPaster.paste(use_shift=use_shift):
+                logger.info("Paste simulated via uinput")
+                return
+            logger.warning("uinput paste failed, falling back")
 
         # Try ydotool (works on both Wayland and X11)
         # Keycodes: 29=LEFTCTRL, 42=LEFTSHIFT, 47=V

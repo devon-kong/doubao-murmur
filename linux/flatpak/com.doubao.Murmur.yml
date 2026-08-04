@@ -22,7 +22,13 @@ finish-args:
   # This is raw keyboard access, i.e. the sandbox can see every keystroke.
   # It is what a global hotkey costs; the host still gates it on the user
   # being in the `input` group, so it is not granted silently.
-  - --device=input
+  #
+  # --device=all (rather than --device=input) additionally exposes
+  # /dev/uinput, which the paste helper uses for kernel-level Ctrl+V
+  # injection on Wayland desktops (e.g. SteamOS) where xdotool/wtype
+  # cannot reach native Wayland windows. The host still gates uinput on
+  # its own permissions (input group / ACL), so this is not silent access.
+  - --device=all
 
   # Audio (microphone via PulseAudio compat layer over PipeWire)
   - --socket=pulseaudio
@@ -73,6 +79,21 @@ modules:
     build-commands:
       - pip3 install --no-cache-dir --prefix=/app
         websockets sounddevice python-xlib
+
+  # wl-clipboard: wl-copy/wl-paste bundled in the sandbox. On Wayland the
+  # compositor refuses clipboard writes from windows without keyboard
+  # focus, so the GTK clipboard API silently fails for our non-focusing
+  # overlay. wl-copy uses the wlr-data-control protocol (supported by
+  # KWin/wlroots, e.g. SteamOS), which works without focus.
+  - name: wl-clipboard
+    buildsystem: meson
+    config-opts:
+      - -Dfishcompletiondir=no
+      - -Dzshcompletiondir=no
+    sources:
+      - type: archive
+        url: https://github.com/bugaevc/wl-clipboard/archive/refs/tags/v2.2.1.tar.gz
+        sha256: 6eb8081207fb5581d1d82c4bcd9587205a31a3d47bea3ebeb7f41aa1143783eb
 
   # Main application
   - name: doubao-murmur
