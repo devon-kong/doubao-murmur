@@ -1,6 +1,6 @@
 # Doubao Murmur
 
-通过劫持豆包 Web 版的语音识别能力，实现全局语音输入。支持 **macOS**、**Windows** 和 **Linux / SteamOS**（Steam Deck 等掌机）。
+通过利用豆包 Web 版的语音识别能力，实现全局语音输入。支持 **macOS**、**Windows** 和 **Linux / SteamOS**（Steam Deck 等掌机）。
 
 - **macOS**：按下右 `⌥ Option` 键开始/停止语音识别，识别结果自动复制到剪贴板并粘贴到当前光标所在的输入框。
 - **Windows**：按下右 `Alt` 键开始/停止，用法与 macOS 一致；托盘菜单里可以把热键换成右 Ctrl / 右 Shift 等。详见 [Windows 版说明](windows/README.md)。
