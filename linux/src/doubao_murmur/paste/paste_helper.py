@@ -17,6 +17,7 @@ import time
 
 from doubao_murmur.config import PASTE_DELAY
 from doubao_murmur.host_tools import command_candidates
+from doubao_murmur.paste.kwin_window import active_window_class as kwin_active_window_class
 from doubao_murmur.paste.uinput_injector import UinputPaster
 
 logger = logging.getLogger(__name__)
@@ -200,11 +201,16 @@ class PasteHelper:
 
     @staticmethod
     def _focused_window_is_terminal() -> bool:
-        """Check whether the focused window is a terminal emulator (X11)."""
+        """Check whether the focused window is a terminal emulator."""
         wm_classes = PasteHelper._focused_window_classes()
         if not wm_classes:
             return False
-        is_terminal = any(c in _TERMINAL_WM_CLASSES for c in wm_classes)
+        # Wayland resourceClass may be a reverse-DNS app id like
+        # "org.kde.konsole"; also match on the last dot-segment.
+        candidates = set(wm_classes)
+        for c in wm_classes:
+            candidates.add(c.rsplit(".", 1)[-1])
+        is_terminal = bool(candidates & _TERMINAL_WM_CLASSES)
         logger.info(
             "Focused window class: %s (terminal=%s)",
             "/".join(wm_classes),
@@ -214,7 +220,11 @@ class PasteHelper:
 
     @staticmethod
     def _focused_window_classes() -> list[str]:
-        """Lowercased WM_CLASS entries of the focused window (X11).
+        """Lowercased WM_CLASS entries of the focused window.
+
+        On KDE Plasma Wayland (e.g. SteamOS desktop mode) X11 tools
+        cannot see the active window, so ask KWin first via its
+        scripting API.
 
         `getwindowclassname` only exists in recent xdotool releases;
         Debian/Ubuntu still ship 3.20160805, where it exits with
@@ -223,6 +233,10 @@ class PasteHelper:
         back to xprop, which lives in x11-utils and is present on any
         desktop that has xdotool.
         """
+        kwin_class = kwin_active_window_class()
+        if kwin_class:
+            return [kwin_class]
+
         for command in command_candidates("xdotool"):
             try:
                 result = subprocess.run(
