@@ -126,7 +126,16 @@ class DoubaoMurmurApp(Gtk.Application):
         )
         self.tray_icon.start()
 
+        # Pre-open the ASR WebSocket so the first hotkey press starts
+        # recognition instantly (no-op when not logged in).
+        GLib.timeout_add(1000, self._prewarm_asr)
+
         logger.info("All components initialized")
+
+    def _prewarm_asr(self) -> bool:
+        if self.transcription_manager:
+            self.transcription_manager.prewarm()
+        return GLib.SOURCE_REMOVE
 
     def _toggle_keyboard(self) -> None:
         if not self.keyboard:
@@ -189,6 +198,7 @@ class DoubaoMurmurApp(Gtk.Application):
         def on_params(params):
             if params:
                 ParamsStore.save(params)
+                self._prewarm_asr()
             if self.login_window:
                 self.login_window.hide()
                 self.login_window.destroy()

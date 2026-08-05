@@ -84,13 +84,23 @@ class ASRClient:
             header_kwargs = _websocket_header_kwargs(
                 websockets.connect, headers
             )
-            async with websockets.connect(
-                url,
+            connect_kwargs = dict(
                 open_timeout=5,
                 close_timeout=3,
                 max_size=2**20,
                 **header_kwargs,
-            ) as ws:
+            )
+            # Race IPv4/IPv6 (happy eyeballs). Without this, a blackholed
+            # IPv6 path (common on mobile hotspots) stalls the connect for
+            # seconds before falling back to IPv4. Older websockets/Python
+            # don't forward the kwarg, hence the TypeError fallback.
+            try:
+                ws = await websockets.connect(
+                    url, happy_eyeballs_delay=0.25, **connect_kwargs
+                )
+            except TypeError:
+                ws = await websockets.connect(url, **connect_kwargs)
+            try:
                 self._ws = ws
                 self._connected = True
                 logger.info("Connected")
@@ -104,6 +114,8 @@ class ASRClient:
                 # Receive loop
                 async for message in ws:
                     self._handle_message(message)
+            finally:
+                await ws.close()
 
         except Exception as e:
             if _is_connection_closed_error(e):
