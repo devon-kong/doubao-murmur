@@ -50,11 +50,6 @@ class TranscriptionManager:
         self.awaiting_final_result = False
         self.safety_timer_id: int | None = None
 
-        # Pre-warmed WebSocket kept ready while idle so the hotkey can
-        # start recognition instantly instead of paying the connect cost.
-        self._warm_client: ASRClient | None = None
-        self._warm_backoff = 2.0
-
         # Callbacks set by app.py
         self.on_auth_expired = None  # () -> None
         self.on_show_login = None  # () -> None
@@ -81,66 +76,6 @@ class TranscriptionManager:
             self._on_auth_error
         )
 
-    # --- Pre-connection ---
-
-    def prewarm(self) -> None:
-        """Open a standby WebSocket while idle (no-op if not possible)."""
-        if self._warm_client is not None:
-            return
-        if self.app_state.recording_state != RecordingState.IDLE:
-            return
-        if self.app_state.login_status != LoginStatus.LOGGED_IN:
-            return
-        params = ParamsStore.load()
-        if not params:
-            return
-
-        logger.info("Pre-warming ASR connection")
-        client = ASRClient()
-        client.on_open = lambda: GLib.idle_add(self._on_warm_open, client)
-        client.on_error = lambda err: GLib.idle_add(
-            self._on_warm_dead, client
-        )
-        client.on_auth_error = lambda: GLib.idle_add(self._on_auth_error)
-        self._warm_client = client
-        client.connect(params)
-
-    def _on_warm_open(self, client: ASRClient) -> bool:
-        if client is self._warm_client:
-            self._warm_backoff = 2.0
-            logger.info("Pre-warmed connection ready")
-        return GLib.SOURCE_REMOVE
-
-    def _on_warm_dead(self, client: ASRClient) -> bool:
-        """Standby connection failed or was closed by the server."""
-        if client is not self._warm_client:
-            return GLib.SOURCE_REMOVE
-        self._warm_client = None
-        delay = self._warm_backoff
-        self._warm_backoff = min(self._warm_backoff * 2, 300.0)
-        logger.info("Pre-warmed connection lost, retrying in %.0fs", delay)
-        GLib.timeout_add(int(delay * 1000), self._prewarm_cb)
-        return GLib.SOURCE_REMOVE
-
-    def _prewarm_cb(self) -> bool:
-        self.prewarm()
-        return GLib.SOURCE_REMOVE
-
-    def _take_warm_client(self) -> ASRClient | None:
-        """Adopt the standby connection if it is ready, else None."""
-        client = self._warm_client
-        if client is None or not client.is_connected:
-            return None
-        self._warm_client = None
-        return client
-
-    def _discard_warm_client(self) -> None:
-        client = self._warm_client
-        self._warm_client = None
-        if client is not None:
-            client.on_error = None
-            client.disconnect()
-
     # --- Toggle ---
 
     def handle_toggle(self) -> None:
@@ -165,28 +100,6 @@ class TranscriptionManager:
         self.app_state.error_message = None
         if self.on_overlay_show:
             self.on_overlay_show()
-
-        # Adopt the pre-warmed connection if one is ready: recognition
-        # starts immediately, no connect latency.
-        warm = self._take_warm_client()
-        if warm is not None:
-            logger.info("Using pre-warmed ASR connection")
-            self.asr_client = warm
-            self._wire_asr_callbacks()
-            self.using_cached_params = True
-            try:
-                self.audio_capture.start(
-                    on_audio_data=self.asr_client.send_audio
-                )
-            except Exception as e:
-                logger.error("Audio capture failed: %s", e)
-                self.app_state.error_message = "麦克风启动失败"
-                GLib.timeout_add(
-                    int(AUTH_EXPIRY_DELAY * 1000), self._reset_to_idle
-                )
-                return
-            self._set_state(RecordingState.RECORDING)
-            return
 
         # Start audio immediately (buffered in ASR client until WS connects)
         try:
@@ -305,8 +218,6 @@ class TranscriptionManager:
             200, lambda: setattr(self.app_state, "transcription_text", "")
             or GLib.SOURCE_REMOVE
         )
-        # Stand up the next warm connection for the following recording.
-        GLib.timeout_add(500, self._prewarm_cb)
         return GLib.SOURCE_REMOVE
 
     def handle_cancel(self) -> None:
@@ -321,7 +232,6 @@ class TranscriptionManager:
     def _handle_auth_failure(self) -> None:
         logger.warning("Auth failure, clearing cached params")
         ParamsStore.clear()
-        self._discard_warm_client()
         self.using_cached_params = False
         self.audio_capture.stop()
         self.asr_client.disconnect()
