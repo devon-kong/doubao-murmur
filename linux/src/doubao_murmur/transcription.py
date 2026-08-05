@@ -23,6 +23,21 @@ from doubao_murmur.params_store import ASRParams, ParamsStore
 logger = logging.getLogger(__name__)
 
 
+def _is_http_auth_rejection(error) -> bool:
+    """True if the WebSocket handshake was rejected with HTTP 401/403.
+
+    Covers both websockets>=13 (InvalidStatus with .response.status_code)
+    and older releases (InvalidStatusCode with .status_code). Anything
+    else -- timeouts, DNS failures, connection resets -- is a network
+    problem, not an auth problem.
+    """
+    status = getattr(error, "status_code", None)
+    if status is None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+    return status in (401, 403)
+
+
 class TranscriptionManager:
     """Orchestrates the recording lifecycle."""
 
@@ -163,7 +178,13 @@ class TranscriptionManager:
         if self.app_state.recording_state == RecordingState.IDLE:
             return GLib.SOURCE_REMOVE
         logger.error("ASR error: %s", error)
-        if self.using_cached_params:
+        # Only treat the error as an auth problem when the server actively
+        # rejected the handshake (HTTP 401/403). Network failures (timeouts,
+        # DNS, resets) used to be lumped in here, which cleared perfectly
+        # valid cached credentials and forced a re-login after every
+        # transient connectivity hiccup. Real in-band auth errors arrive
+        # via _on_auth_error instead.
+        if self.using_cached_params and _is_http_auth_rejection(error):
             self._handle_auth_failure()
             return GLib.SOURCE_REMOVE
         self.app_state.error_message = "连接出错"
