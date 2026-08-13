@@ -24,10 +24,12 @@ from typing import Any
 from urllib.parse import urlencode
 
 from doubao_murmur.config import (
+    AUDIO_SAMPLE_RATE,
     AUTH_ERROR_CODE,
     AUTH_ERROR_KEYWORDS,
     FIXED_QUERY_PARAMS,
     ORIGIN,
+    STOP_TRAILING_SILENCE_MS,
     WSS_BASE_URL,
 )
 from doubao_murmur.params_store import ASRParams
@@ -150,12 +152,34 @@ class ASRClient:
             else:
                 self._pending_audio.append(data)
 
-    def finish_sending(self) -> None:
-        """Signal no more audio; keep WS open for final results."""
+    def finish_sending(
+        self, trailing_silence_ms: int = STOP_TRAILING_SILENCE_MS
+    ) -> None:
+        """Signal no more mic audio; keep WS open for the final results.
+
+        Flushes a short tail of digital silence first. The service emits exactly
+        one result per audio message it receives and withholds the last word until
+        further audio arrives, so a stream that simply stops never gets its tail
+        transcribed. The padding is queued at once rather than paced in real time,
+        so it costs no extra wall-clock time.
+        """
         with self._lock:
             self._pending_audio.clear()
+            ws = self._ws
+            was_connected = self._connected
             self._connected = False
-        logger.info("Finished sending audio, waiting for server response")
+
+        if was_connected and ws and trailing_silence_ms > 0:
+            if self._loop and self._loop.is_running():
+                chunk_ms = 100
+                silence = bytes(AUDIO_SAMPLE_RATE * 2 * chunk_ms // 1000)
+                for _ in range(max(1, trailing_silence_ms // chunk_ms)):
+                    asyncio.run_coroutine_threadsafe(ws.send(silence), self._loop)
+
+        logger.info(
+            "Finished sending audio (+%dms silence), waiting for final results",
+            trailing_silence_ms,
+        )
 
     def disconnect(self) -> None:
         """Close the WebSocket."""

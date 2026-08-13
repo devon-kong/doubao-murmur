@@ -6,6 +6,14 @@ private let tmLogger = Logger(subsystem: "com.doubao.murmur", category: "Transcr
 
 @MainActor
 class TranscriptionManager {
+    /// How long the result stream must stay quiet before the transcript is accepted.
+    /// After the audio ends the server keeps correcting for a few hundred ms; the
+    /// gap between the last partial result and the final one measures ~150ms, so
+    /// this needs to be comfortably longer than that.
+    private static let finalResultQuietPeriod: TimeInterval = 0.25
+    /// Upper bound on waiting for the final results before giving up.
+    private static let stopSafetyTimeout: TimeInterval = 1.5
+
     private let appState: AppState
     private let webViewManager: WebViewManager
     private let overlayPanel: OverlayPanel
@@ -16,8 +24,13 @@ class TranscriptionManager {
     /// Whether the current WSS connection is using cached (file-based) params.
     private var usingCachedParams = false
 
-    /// True after stopRecording(): the next `onResult` triggers completion immediately.
+    /// True after stopRecording(): incoming results are the tail of the utterance
+    /// and completion is deferred until the stream falls quiet.
     private var awaitingFinalResult = false
+
+    /// Completion scheduled by `scheduleFinalCompletion()`, rescheduled on each
+    /// late-arriving result so only the last one takes effect.
+    private var finalResultDebounce: DispatchWorkItem?
 
     /// Called when auth has expired and user needs to re-login.
     var onAuthExpired: (() -> Void)?
@@ -69,8 +82,7 @@ class TranscriptionManager {
                     self.setRecordingState(.recording)
                 }
                 if self.awaitingFinalResult {
-                    self.awaitingFinalResult = false
-                    self.completeTranscription()
+                    self.scheduleFinalCompletion()
                 }
             }
         }
@@ -201,16 +213,36 @@ class TranscriptionManager {
         print("[TranscriptionManager] ⏹ Stopping recording...")
         setRecordingState(.stopping)
         audioCapture.stopCapture()
+        // Flushes trailing silence so the server finalises the last word.
         asrClient.finishSending()
         awaitingFinalResult = true
 
-        // Safety timeout: if no result or finish arrives within 1 second, complete with current text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // Safety timeout: if the stream never falls quiet, complete with current text.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.stopSafetyTimeout) { [weak self] in
             guard let self = self, self.appState.recordingState == .stopping else { return }
             print("[TranscriptionManager] ⏱ Safety timeout, completing with current text")
             self.awaitingFinalResult = false
             self.completeTranscription()
         }
+    }
+
+    /// Wait for the result stream to go quiet before accepting the transcript.
+    ///
+    /// The server streams corrections right up to the end: after the audio stops it
+    /// first replays the pending partial results, and only then sends the one that
+    /// carries the final word. Completing on the first result that arrives after
+    /// stopping would truncate the tail — which is exactly the "last two characters
+    /// are missing" symptom — so each late result pushes the deadline back instead.
+    private func scheduleFinalCompletion() {
+        finalResultDebounce?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, self.awaitingFinalResult else { return }
+            print("[TranscriptionManager] Result stream quiet, completing")
+            self.awaitingFinalResult = false
+            self.completeTranscription()
+        }
+        finalResultDebounce = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.finalResultQuietPeriod, execute: item)
     }
 
     // MARK: - Auth Failure
@@ -259,6 +291,8 @@ class TranscriptionManager {
     private func resetToIdle() {
         print("[TranscriptionManager] Resetting to idle")
         awaitingFinalResult = false
+        finalResultDebounce?.cancel()
+        finalResultDebounce = nil
         audioCapture.stopCapture()
         asrClient.disconnect()
         setRecordingState(.idle)

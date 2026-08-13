@@ -176,7 +176,19 @@ async fn run<F: Fn(AsrEvent)>(
             biased;
 
             ctl = ctl_rx.recv() => match ctl {
-                Some(Ctl::Finish) => sending = false,
+                Some(Ctl::Finish) => {
+                    // Flush trailing silence so the server finalises the last
+                    // word before we stop feeding it audio; see
+                    // config::STOP_TRAILING_SILENCE_MS.
+                    let silence = vec![0u8; config::audio_chunk_samples() * 2];
+                    for _ in 0..config::stop_trailing_silence_chunks() {
+                        if let Err(e) = write.send(Message::Binary(silence.clone())).await {
+                            log_warn!("Silence padding send failed: {e}");
+                            break;
+                        }
+                    }
+                    sending = false;
+                }
                 Some(Ctl::Disconnect) | None => {
                     closed_by_us = true;
                     break;

@@ -77,7 +77,17 @@ def get_overlay_config_path() -> Path:
 
 # --- Timeouts ---
 
-STOP_SAFETY_TIMEOUT = 1.0  # seconds
+STOP_SAFETY_TIMEOUT = 1.5  # seconds; upper bound on waiting for final results
+# Trailing digital silence flushed when recording stops. The service emits one
+# result per audio message and withholds the last word until more audio arrives,
+# so without this padding the tail of the utterance is never transcribed.
+# Measured: losing ~150ms of tail audio costs the final two characters, and
+# ~100ms of silence recovers them; 200ms leaves margin.
+STOP_TRAILING_SILENCE_MS = 200
+# The result stream must stay quiet this long before the transcript is accepted.
+# After the audio ends the server replays pending partials before sending the
+# one carrying the final word; that gap measures ~150ms.
+FINAL_RESULT_QUIET_PERIOD = 0.25  # seconds
 DEBOUNCE_INTERVAL = 0.3  # seconds
 PASTE_DELAY = 0.05  # seconds between copy and paste simulation
 AUTH_EXPIRY_DELAY = 2.0  # seconds before resetting after auth error

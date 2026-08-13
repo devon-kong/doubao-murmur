@@ -52,10 +52,25 @@ pub fn audio_chunk_samples() -> usize {
     (AUDIO_SAMPLE_RATE as usize) * (AUDIO_CHUNK_MS as usize) / 1000
 }
 
+/// Trailing digital silence flushed when recording stops. The service emits one
+/// result per audio message and withholds the last word until further audio
+/// arrives, so a stream that simply stops never gets its tail transcribed.
+/// Measured: losing ~150ms of tail audio costs the final two characters, and
+/// ~100ms of silence recovers them; 200ms leaves margin.
+pub const STOP_TRAILING_SILENCE_MS: u32 = 200;
+
+pub fn stop_trailing_silence_chunks() -> usize {
+    ((STOP_TRAILING_SILENCE_MS / AUDIO_CHUNK_MS) as usize).max(1)
+}
+
 // --- Timeouts ---
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const STOP_SAFETY_TIMEOUT: Duration = Duration::from_millis(1000);
+pub const STOP_SAFETY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// The result stream must stay quiet this long before the transcript is accepted.
+/// After the audio ends the server replays pending partials before sending the
+/// one carrying the final word; that gap measures ~150ms.
+pub const FINAL_RESULT_QUIET_PERIOD: Duration = Duration::from_millis(250);
 pub const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(300);
 pub const PASTE_DELAY: Duration = Duration::from_millis(80);
 pub const AUTH_EXPIRY_DELAY: Duration = Duration::from_secs(2);

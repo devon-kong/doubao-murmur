@@ -35,6 +35,9 @@ pub enum Event {
     HotkeyCancel,
     Asr(AsrEvent),
     SafetyTimeout(u64),
+    /// Debounced completion after the stop: (generation, quiet_epoch). Superseded
+    /// whenever a later result reschedules it with a fresh epoch.
+    StreamQuiet(u64, u64),
     ResetIdle(u64),
     LoginPoll,
     ShowLogin,
@@ -91,6 +94,7 @@ pub fn spawn(app: &AppHandle, settings: Settings) {
         text: String::new(),
         using_cached: false,
         awaiting_final: false,
+        quiet_epoch: 0,
         asr: AsrClient::new(),
         audio: AudioCapture::new(),
         last_toggle: None,
@@ -110,6 +114,9 @@ struct Controller {
     text: String,
     using_cached: bool,
     awaiting_final: bool,
+    /// Bumped each time completion is rescheduled, so only the newest
+    /// `StreamQuiet` event is honoured.
+    quiet_epoch: u64,
     asr: AsrClient,
     audio: AudioCapture,
     last_toggle: Option<Instant>,
@@ -138,6 +145,7 @@ impl Controller {
             Event::HotkeyCancel => self.cancel(),
             Event::Asr(event) => self.on_asr(event),
             Event::SafetyTimeout(generation) => self.on_safety_timeout(generation),
+            Event::StreamQuiet(generation, epoch) => self.on_stream_quiet(generation, epoch),
             Event::ResetIdle(generation) => {
                 if generation == self.generation {
                     self.reset_to_idle();
@@ -244,9 +252,38 @@ impl Controller {
         log_info!("Stopping recording");
         self.set_state(RecordingState::Stopping);
         self.audio.stop();
+        // Flushes trailing silence so the server finalises the last word.
         self.asr.finish_sending();
         self.awaiting_final = true;
         self.later(config::STOP_SAFETY_TIMEOUT, Event::SafetyTimeout(self.generation));
+    }
+
+    /// Wait for the result stream to go quiet before accepting the transcript.
+    ///
+    /// The server streams corrections right up to the end: after the audio stops it
+    /// replays the pending partial results first, and only then sends the one
+    /// carrying the final word. Completing on the first result to arrive after
+    /// stopping truncates the tail -- the "last two characters are missing"
+    /// symptom -- so each late result pushes the deadline back instead.
+    fn schedule_final_completion(&mut self) {
+        self.quiet_epoch += 1;
+        self.later(
+            config::FINAL_RESULT_QUIET_PERIOD,
+            Event::StreamQuiet(self.generation, self.quiet_epoch),
+        );
+    }
+
+    fn on_stream_quiet(&mut self, generation: u64, epoch: u64) {
+        if generation != self.generation
+            || epoch != self.quiet_epoch
+            || !self.awaiting_final
+            || self.state != RecordingState::Stopping
+        {
+            return;
+        }
+        log_info!("Result stream quiet, completing");
+        self.awaiting_final = false;
+        self.complete();
     }
 
     fn on_safety_timeout(&mut self, generation: u64) {
@@ -284,8 +321,7 @@ impl Controller {
                 self.push_overlay(None);
 
                 if self.awaiting_final {
-                    self.awaiting_final = false;
-                    self.complete();
+                    self.schedule_final_completion();
                 }
             }
             AsrEvent::Finished => {

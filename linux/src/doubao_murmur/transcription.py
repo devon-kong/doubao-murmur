@@ -17,7 +17,11 @@ from gi.repository import GLib
 from doubao_murmur.app_state import AppState, LoginStatus, RecordingState
 from doubao_murmur.asr_client import ASRClient
 from doubao_murmur.audio_capture import AudioCapture
-from doubao_murmur.config import AUTH_EXPIRY_DELAY, STOP_SAFETY_TIMEOUT
+from doubao_murmur.config import (
+    AUTH_EXPIRY_DELAY,
+    FINAL_RESULT_QUIET_PERIOD,
+    STOP_SAFETY_TIMEOUT,
+)
 from doubao_murmur.params_store import ASRParams, ParamsStore
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,8 @@ class TranscriptionManager:
         self.using_cached_params = False
         self.awaiting_final_result = False
         self.safety_timer_id: int | None = None
+        # Pending completion, rescheduled on each late result so only the last wins.
+        self.quiet_timer_id: int | None = None
 
         # Callbacks set by app.py
         self.on_auth_expired = None  # () -> None
@@ -131,6 +137,7 @@ class TranscriptionManager:
         logger.info("Stopping recording...")
         self._set_state(RecordingState.STOPPING)
         self.audio_capture.stop()
+        # Flushes trailing silence so the server finalises the last word.
         self.asr_client.finish_sending()
         self.awaiting_final_result = True
 
@@ -139,12 +146,37 @@ class TranscriptionManager:
             int(STOP_SAFETY_TIMEOUT * 1000), self._safety_timeout
         )
 
+    def _schedule_final_completion(self) -> None:
+        """Wait for the result stream to go quiet before accepting the transcript.
+
+        The server streams corrections right up to the end: after the audio stops
+        it replays the pending partial results first, and only then sends the one
+        carrying the final word. Completing on the first result to arrive after
+        stopping truncates the tail -- the "last two characters are missing"
+        symptom -- so each late result pushes the deadline back instead.
+        """
+        if self.quiet_timer_id is not None:
+            GLib.source_remove(self.quiet_timer_id)
+        self.quiet_timer_id = GLib.timeout_add(
+            int(FINAL_RESULT_QUIET_PERIOD * 1000), self._on_stream_quiet
+        )
+
+    def _on_stream_quiet(self) -> bool:
+        self.quiet_timer_id = None
+        if self.awaiting_final_result:
+            logger.info("Result stream quiet, completing")
+            self.awaiting_final_result = False
+            self._complete_transcription()
+        return GLib.SOURCE_REMOVE
+
     def _safety_timeout(self) -> bool:
+        # Clear first: completing resets state, which drops pending stop timers,
+        # and this source must not be among them while it is still running.
+        self.safety_timer_id = None
         if self.app_state.recording_state == RecordingState.STOPPING:
             logger.info("Safety timeout, completing with current text")
             self.awaiting_final_result = False
             self._complete_transcription()
-        self.safety_timer_id = None
         return GLib.SOURCE_REMOVE
 
     # --- ASR callbacks (on GTK main thread via GLib.idle_add) ---
@@ -161,8 +193,7 @@ class TranscriptionManager:
         if self.app_state.recording_state == RecordingState.STARTING:
             self._set_state(RecordingState.RECORDING)
         if self.awaiting_final_result:
-            self.awaiting_final_result = False
-            self._complete_transcription()
+            self._schedule_final_completion()
         return GLib.SOURCE_REMOVE
 
     def _on_asr_finish(self) -> bool:
@@ -197,6 +228,14 @@ class TranscriptionManager:
 
     # --- Completion & Reset ---
 
+    def _cancel_stop_timers(self) -> None:
+        """Drop any pending stop-phase timers so they cannot fire after reset."""
+        for attr in ("quiet_timer_id", "safety_timer_id"):
+            timer_id = getattr(self, attr)
+            if timer_id is not None:
+                GLib.source_remove(timer_id)
+                setattr(self, attr, None)
+
     def _complete_transcription(self) -> None:
         text = self.app_state.transcription_text.strip()
         logger.info("Completing transcription: '%s'", text[:50])
@@ -206,6 +245,7 @@ class TranscriptionManager:
 
     def _reset_to_idle(self) -> bool:
         self.awaiting_final_result = False
+        self._cancel_stop_timers()
         self.audio_capture.stop()
         self.asr_client.disconnect()
         self._set_state(RecordingState.IDLE)

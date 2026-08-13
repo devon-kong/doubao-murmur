@@ -35,6 +35,11 @@ struct DoubaoASRParams: Codable {
 /// Connects to `wss://ws-samantha.doubao.com/samantha/audio/asr` with cookie auth,
 /// sends raw Int16 LE PCM audio data, and receives JSON transcription results.
 class DoubaoASRClient {
+    /// Audio format the service expects: 16kHz mono Int16.
+    private static let sampleRate = 16000
+    /// Granularity of the trailing silence padding sent by `finishSending`.
+    private static let silenceChunkMs = 100
+
     private var webSocketTask: URLSessionWebSocketTask?
     private(set) var isConnected = false
 
@@ -123,14 +128,39 @@ class DoubaoASRClient {
         }
     }
 
-    /// Signal that no more audio will be sent, but keep the WebSocket open
-    /// to receive the final transcription results (finish event) from the server.
-    func finishSending() {
+    /// Signal that no more microphone audio will be sent, but keep the WebSocket
+    /// open to receive the final transcription results from the server.
+    ///
+    /// A short tail of digital silence is flushed first. The service emits exactly
+    /// one result per audio message it receives, and it withholds the last word
+    /// until further audio arrives — so if the stream just stops, that word is
+    /// never transcribed. Measured against a known utterance, dropping ~150ms of
+    /// tail audio consistently costs the final two characters, and ~100ms of
+    /// silence is enough to make the server finalise them; 200ms leaves margin.
+    /// The padding is queued immediately rather than paced in real time, so it
+    /// adds no wall-clock delay of its own.
+    func finishSending(trailingSilenceMs: Int = 200) {
         bufferLock.lock()
         pendingAudioBuffer.removeAll()
+        let task = webSocketTask
+        let wasConnected = isConnected
         bufferLock.unlock()
+
+        if wasConnected, let task = task, trailingSilenceMs > 0 {
+            let bytesPerChunk = Self.sampleRate * 2 * Self.silenceChunkMs / 1000
+            let silence = Data(count: bytesPerChunk)
+            let chunkCount = max(1, trailingSilenceMs / Self.silenceChunkMs)
+            for _ in 0..<chunkCount {
+                task.send(.data(silence)) { error in
+                    if let error = error {
+                        print("[DoubaoASRClient] ⚠️ Silence padding error: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+
         isConnected = false
-        print("[DoubaoASRClient] Finished sending audio, waiting for server response")
+        print("[DoubaoASRClient] Finished sending audio (+\(trailingSilenceMs)ms silence), waiting for final results")
     }
 
     func disconnect() {
