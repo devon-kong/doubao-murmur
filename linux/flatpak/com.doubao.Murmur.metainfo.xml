@@ -25,14 +25,29 @@
   <url type="homepage">https://github.com/lilong7676/doubao-murmur</url>
   <developer_name>lilong7676</developer_name>
   <releases>
-    <release version="1.5.1-beta.1" date="2026-08-02" type="development">
+    <release version="1.5.1" date="2026-08-13">
       <description>
+        <p>Keeps the last word or two of a transcription that used to go missing
+           when you stopped recording. The service returns one result per audio
+           message and holds the final word back until more audio arrives, so
+           ending the stream abruptly meant that word was never transcribed;
+           recording now ends with a short pad of silence, and the transcript is
+           accepted once the results stop arriving rather than on the first one.</p>
         <p>Fixes the global hotkey on Wayland sessions. The sandbox was never
            granted /dev/input, so the evdev listener could not start; on Wayland
            that is the only backend that works, because the preferred X11
-           listener cannot see keys sent to native Wayland windows. Auto-paste
-           on Wayland still requires ydotool; without it the transcription is
-           copied to the clipboard and can be pasted manually.</p>
+           listener cannot see keys sent to native Wayland windows.</p>
+        <p>Fixes auto-paste on Wayland desktops such as SteamOS. The clipboard
+           copy silently failed without wl-clipboard on the host, which is now
+           bundled, and the paste keystroke never reached native Wayland windows
+           because xdotool only injects into XWayland; a uinput-based injector
+           handles both Wayland and X11. Terminal windows are also detected
+           correctly on Plasma Wayland now, so they receive Ctrl+Shift+V instead
+           of a Ctrl+V that they swallowed as a control character.</p>
+        <p>A flaky network no longer forces you to log in again: cached
+           credentials are cleared only when the server actively rejects them,
+           not on handshake timeouts. Connecting also stays around half a second
+           on networks with a blackholed IPv6 path.</p>
       </description>
     </release>
     <release version="1.5.0" date="2026-08-02">
