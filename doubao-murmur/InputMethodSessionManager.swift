@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CoreGraphics
 import Foundation
@@ -17,6 +18,9 @@ final class InputMethodSessionManager {
     private static let functionKeyStartDelay: TimeInterval = 0.10
     private static let finalTextQuietPeriod: TimeInterval = 0.35
     private static let stopSafetyTimeout: TimeInterval = 1.5
+    /// Wait until the previous frontmost app (usually UU) is key again, and
+    /// until its inbound clipboard sync has finished, before publishing text.
+    private static let focusReturnDelay: TimeInterval = 0.15
 
     private let appState: AppState
     private let overlayPanel: OverlayPanel
@@ -28,6 +32,8 @@ final class InputMethodSessionManager {
     private var functionKeyWorkItem: DispatchWorkItem?
     private var finalTextQuietWorkItem: DispatchWorkItem?
     private var stopSafetyWorkItem: DispatchWorkItem?
+    private var clipboardPublishWorkItem: DispatchWorkItem?
+    private var previousFrontmostApp: NSRunningApplication?
     private var transcriptionTextObservation: AnyCancellable?
 
     init(appState: AppState, overlayPanel: OverlayPanel, hotkeyManager: HotkeyManager) {
@@ -68,6 +74,8 @@ final class InputMethodSessionManager {
 
     func stop() {
         cancelSession()
+        clipboardPublishWorkItem?.cancel()
+        clipboardPublishWorkItem = nil
         transcriptionTextObservation?.cancel()
         transcriptionTextObservation = nil
         hotkeyManager.stop()
@@ -89,6 +97,10 @@ final class InputMethodSessionManager {
             showInputSourceError("无法保存当前输入法")
             return
         }
+
+        clipboardPublishWorkItem?.cancel()
+        clipboardPublishWorkItem = nil
+        previousFrontmostApp = NSWorkspace.shared.frontmostApplication
 
         phase = .preparing
         appState.transcriptionText = ""
@@ -188,13 +200,25 @@ final class InputMethodSessionManager {
     private func completeSession() {
         guard phase == .stopping else { return }
         let text = trimmedTranscriptionText
-        if !text.isEmpty {
-            PasteHelper.copyAndPaste(text)
-        } else {
-            print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")
-        }
         closeSession()
+        if text.isEmpty {
+            print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")
+        } else {
+            scheduleClipboardPaste(text)
+        }
         print("[InputMethodSessionManager] ✅ Session completed (text length: \(text.count))")
+    }
+
+    /// Publish the clipboard only after UU is frontmost again. UU syncs the
+    /// remote clipboard on focus; writing beforehand lets that inbound sync
+    /// overwrite this session's text, so ⌘V pastes the previous phrase.
+    private func scheduleClipboardPaste(_ text: String) {
+        clipboardPublishWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            PasteHelper.copyAndPaste(text)
+        }
+        clipboardPublishWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusReturnDelay, execute: workItem)
     }
 
     private func cancelSession() {
@@ -218,7 +242,19 @@ final class InputMethodSessionManager {
         overlayPanel.clearText()
         overlayPanel.hideOverlay()
         inputSourceManager.restorePreviousInputSource()
+        activatePreviousFrontmostApp()
         appState.reset()
+    }
+
+    private func activatePreviousFrontmostApp() {
+        let app = previousFrontmostApp
+        previousFrontmostApp = nil
+        guard let app, !app.isTerminated else { return }
+        if #available(macOS 14.0, *) {
+            _ = app.activate()
+        } else {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
     }
 
     private var trimmedTranscriptionText: String {

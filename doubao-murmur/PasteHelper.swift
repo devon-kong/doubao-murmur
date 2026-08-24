@@ -14,7 +14,8 @@ struct PasteHelper {
         }
         print("[PasteHelper] ✅ Copied transcription text (length: \(text.count))")
 
-        // Allow the frontmost app and any remote clipboard sync to settle before ⌘V.
+        // Outbound delay for remote-desktop clipboard sync (e.g. UU).
+        // Callers must return focus to the target app before writing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             print("[PasteHelper] ⌘V")
             simulatePaste()
