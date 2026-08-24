@@ -18,9 +18,10 @@ final class InputMethodSessionManager {
     private static let functionKeyStartDelay: TimeInterval = 0.10
     private static let finalTextQuietPeriod: TimeInterval = 0.35
     private static let stopSafetyTimeout: TimeInterval = 1.5
-    /// Wait until the previous frontmost app (usually UU) is key again, and
-    /// until its inbound clipboard sync has finished, before publishing text.
-    private static let focusReturnDelay: TimeInterval = 0.15
+    /// Poll interval / budget for waiting until UU (or the previous app) is
+    /// actually frontmost before publishing the clipboard.
+    private static let frontmostPollInterval: TimeInterval = 0.05
+    private static let frontmostWaitBudget: TimeInterval = 0.40
 
     private let appState: AppState
     private let overlayPanel: OverlayPanel
@@ -34,6 +35,7 @@ final class InputMethodSessionManager {
     private var stopSafetyWorkItem: DispatchWorkItem?
     private var clipboardPublishWorkItem: DispatchWorkItem?
     private var previousFrontmostApp: NSRunningApplication?
+    private var pasteTargetApp: NSRunningApplication?
     private var transcriptionTextObservation: AnyCancellable?
 
     init(appState: AppState, overlayPanel: OverlayPanel, hotkeyManager: HotkeyManager) {
@@ -76,6 +78,7 @@ final class InputMethodSessionManager {
         cancelSession()
         clipboardPublishWorkItem?.cancel()
         clipboardPublishWorkItem = nil
+        PasteHelper.cancelPendingPaste()
         transcriptionTextObservation?.cancel()
         transcriptionTextObservation = nil
         hotkeyManager.stop()
@@ -100,7 +103,9 @@ final class InputMethodSessionManager {
 
         clipboardPublishWorkItem?.cancel()
         clipboardPublishWorkItem = nil
+        PasteHelper.cancelPendingPaste()
         previousFrontmostApp = NSWorkspace.shared.frontmostApplication
+        pasteTargetApp = nil
 
         phase = .preparing
         appState.transcriptionText = ""
@@ -209,16 +214,35 @@ final class InputMethodSessionManager {
         print("[InputMethodSessionManager] ✅ Session completed (text length: \(text.count))")
     }
 
-    /// Publish the clipboard only after UU is frontmost again. UU syncs the
-    /// remote clipboard on focus; writing beforehand lets that inbound sync
-    /// overwrite this session's text, so ⌘V pastes the previous phrase.
+    /// Wait until the previous app is frontmost, then publish. UU's inbound
+    /// remote clipboard sync is racy: a fixed 0.15s delay is sometimes too
+    /// short, and the board can still be overwritten after the first write.
     private func scheduleClipboardPaste(_ text: String) {
         clipboardPublishWorkItem?.cancel()
-        let workItem = DispatchWorkItem {
+        PasteHelper.cancelPendingPaste()
+        waitUntilPasteTargetIsFrontmost(attemptsRemaining: Int(Self.frontmostWaitBudget / Self.frontmostPollInterval)) { [weak self] in
+            guard self != nil else { return }
             PasteHelper.copyAndPaste(text)
         }
+    }
+
+    private func waitUntilPasteTargetIsFrontmost(attemptsRemaining: Int, then work: @escaping () -> Void) {
+        let target = pasteTargetApp
+        let isReady = target == nil
+            || target?.isTerminated == true
+            || NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier
+        if isReady || attemptsRemaining <= 0 {
+            if !isReady {
+                print("[InputMethodSessionManager] ⚠️ Timed out waiting for previous app to become frontmost; publishing clipboard anyway")
+            }
+            work()
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.waitUntilPasteTargetIsFrontmost(attemptsRemaining: attemptsRemaining - 1, then: work)
+        }
         clipboardPublishWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusReturnDelay, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.frontmostPollInterval, execute: workItem)
     }
 
     private func cancelSession() {
@@ -249,6 +273,7 @@ final class InputMethodSessionManager {
     private func activatePreviousFrontmostApp() {
         let app = previousFrontmostApp
         previousFrontmostApp = nil
+        pasteTargetApp = app
         guard let app, !app.isTerminated else { return }
         if #available(macOS 14.0, *) {
             _ = app.activate()
