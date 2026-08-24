@@ -50,6 +50,4 @@ jobs:
         with:
           generate_release_notes: true
           files: ${{ env.ARTIFACT_PATH }}
-          # See the note in flatpak-release.yml: every workflow that updates
-          # the release must agree on this flag.
           prerelease: ${{ contains(github.ref_name, '-') }}
