@@ -1,50 +1,25 @@
+import AppKit
 import SwiftUI
 
 struct OverlayView: View {
     @ObservedObject var appState: AppState
+    let onTextViewReady: (NSTextView) -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            // State indicator: spinner when starting, pulsing dot when recording
-            if appState.recordingState == .starting {
-                SpinnerView()
-                    .frame(width: 14, height: 14)
-            } else {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 10, height: 10)
-                    .opacity(appState.recordingState == .recording ? 1.0 : 0.5)
-                    .animation(
-                        appState.recordingState == .recording
-                            ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true)
-                            : .default,
-                        value: appState.recordingState == .recording
-                    )
-            }
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 9, height: 9)
+                .opacity(appState.recordingState == .recording ? 1 : 0.55)
 
-            if let error = appState.errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.system(size: 14, weight: .medium))
-                    .lineLimit(1)
-            } else if appState.transcriptionText.isEmpty {
-                Text(statusText)
-                    .foregroundColor(.gray)
-                    .font(.system(size: 14))
-                    .lineLimit(1)
-            } else {
-                Text(appState.transcriptionText)
-                    .foregroundColor(.white)
-                    .font(.system(size: 14, weight: .medium))
-                    .lineLimit(2)
-                    .truncationMode(.head)
-            }
-
-            Spacer(minLength: 0)
+            IMETextView(
+                text: $appState.transcriptionText,
+                onTextViewReady: onTextViewReady
+            )
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(white: 0.2).opacity(0.95))
@@ -54,35 +29,66 @@ struct OverlayView: View {
                 .stroke(Color.white.opacity(0.25), lineWidth: 1)
         )
     }
-
-    private var statusText: String {
-        switch appState.recordingState {
-        case .idle:
-            return ""
-        case .starting:
-            return "正在启动语音识别..."
-        case .recording:
-            return "正在聆听..."
-        case .stopping:
-            return "正在处理..."
-        }
-    }
 }
 
-// MARK: - Spinner for loading state
+private struct IMETextView: NSViewRepresentable {
+    @Binding var text: String
+    let onTextViewReady: (NSTextView) -> Void
 
-private struct SpinnerView: View {
-    @State private var isAnimating = false
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
 
-    var body: some View {
-        Circle()
-            .trim(from: 0.1, to: 0.9)
-            .stroke(Color.white.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            .rotationEffect(.degrees(isAnimating ? 360 : 0))
-            .animation(
-                .linear(duration: 0.8).repeatForever(autoreverses: false),
-                value: isAnimating
-            )
-            .onAppear { isAnimating = true }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.font = .systemFont(ofSize: 14)
+        textView.textColor = .white
+        textView.insertionPointColor = .white
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        scrollView.documentView = textView
+
+        DispatchQueue.main.async {
+            onTextViewReady(textView)
+        }
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text && !textView.hasMarkedText() {
+            textView.string = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: IMETextView
+
+        init(parent: IMETextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
     }
 }

@@ -8,10 +8,15 @@ struct PasteHelper {
         // Copy to clipboard
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        guard pasteboard.setString(text, forType: .string) else {
+            print("[PasteHelper] ❌ Failed to write transcription text to the clipboard")
+            return
+        }
+        print("[PasteHelper] ✅ Copied transcription text (length: \(text.count))")
 
-        // Short delay then simulate ⌘V
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        // Allow the frontmost app and any remote clipboard sync to settle before ⌘V.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            print("[PasteHelper] ⌘V")
             simulatePaste()
         }
     }

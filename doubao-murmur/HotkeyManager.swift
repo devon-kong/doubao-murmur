@@ -17,8 +17,6 @@ class HotkeyManager {
     private var accessibilityPollTimer: Timer?
     private var tapRetryCount = 0
     private let maxTapRetries = 30
-    private var rightOptionDown = false
-    private var otherKeyPressed = false
     private var lastToggleTime: TimeInterval = 0
     private let debounceInterval: TimeInterval = 0.3
     private var shouldConsumeEscape = false
@@ -44,7 +42,7 @@ class HotkeyManager {
     }
 
     private func tryCreateEventTap() -> Bool {
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+        let eventMask: CGEventMask = 1 << CGEventType.keyDown.rawValue
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -126,16 +124,21 @@ class HotkeyManager {
             return Unmanaged.passRetained(event)
         }
 
-        if type == .flagsChanged {
-            return handleFlagsChanged(event)
-        }
-
         if type == .keyDown {
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
-            // Track that another key was pressed while right option is down
-            if rightOptionDown {
-                otherKeyPressed = true
+            // Control + / (ANSI keycode 44), without other primary modifiers.
+            let modifiers = event.flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
+            if keyCode == 44 && modifiers == .maskControl {
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - lastToggleTime > debounceInterval {
+                    lastToggleTime = now
+                    print("[HotkeyManager] 🎤 Control + / -> toggleRecording (handler set: \(onHotkeyEvent != nil))")
+                    onHotkeyEvent?(.toggleRecording)
+                } else {
+                    print("[HotkeyManager] Control + / debounced (interval=\(now - lastToggleTime)s)")
+                }
+                return nil // Consume Control + /
             }
 
             // ESC key
@@ -148,43 +151,6 @@ class HotkeyManager {
                 }
                 onHotkeyEvent?(.cancel)
                 return nil // Consume ESC when we handle it
-            }
-        }
-
-        return Unmanaged.passRetained(event)
-    }
-
-    private func handleFlagsChanged(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let flags = event.flags
-        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
-
-        // Right Option key: keycode 61
-        let isRightOption = keycode == 61
-
-        if isRightOption {
-            let isOptionDown = flags.contains(.maskAlternate)
-
-            if isOptionDown && !rightOptionDown {
-                // Right Option pressed down
-                rightOptionDown = true
-                otherKeyPressed = false
-                print("[HotkeyManager] Right Option ↓ (keycode=\(keycode), flags=\(flags.rawValue))")
-            } else if !isOptionDown && rightOptionDown {
-                // Right Option released
-                rightOptionDown = false
-                print("[HotkeyManager] Right Option ↑ (otherKeyPressed=\(otherKeyPressed))")
-
-                if !otherKeyPressed {
-                    // Clean press-and-release with no other keys
-                    let now = ProcessInfo.processInfo.systemUptime
-                    if now - lastToggleTime > debounceInterval {
-                        lastToggleTime = now
-                        print("[HotkeyManager] 🎤 Firing toggleRecording (handler set: \(onHotkeyEvent != nil))")
-                        onHotkeyEvent?(.toggleRecording)
-                    } else {
-                        print("[HotkeyManager] Debounced (interval=\(now - lastToggleTime)s)")
-                    }
-                }
             }
         }
 
