@@ -65,6 +65,18 @@ struct PasteRouter {
         return settings.uuPasteMode == .direct ? .uuDirect : .uuCompatibility
     }
 
+    /// Both UU routes must publish the text locally before the app restores UU
+    /// to the foreground. Compatibility needs time for normal sync; direct
+    /// needs the same prepublish so both channels carry the same current text,
+    /// reducing the risk of UU bidirectional sync overwriting the controlled
+    /// Mac's freshly written clipboard. This never authorizes a paste by itself.
+    static func shouldPrepublishLocalClipboard(for route: PasteRoute) -> Bool {
+        switch route {
+        case .local: return false
+        case .uuCompatibility, .uuDirect: return true
+        }
+    }
+
     /// A small dispatch seam used by the session manager and isolated routing
     /// tests, so a new route cannot accidentally invoke another strategy.
     static func execute(

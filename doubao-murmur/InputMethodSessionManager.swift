@@ -211,11 +211,14 @@ final class InputMethodSessionManager {
         let target = pasteTargetApp
         let route = PasteRouter().route(for: target)
         let generation = pasteGeneration
-        if !text.isEmpty, route == .uuCompatibility {
-            // Publish the final text to the local clipboard *before* returning
-            // focus to UU. UU's local → remote clipboard sync is the slow step
-            // (it is what made pastes lag one session behind); the earlier the
-            // text is on the board, the longer UU has to push it before ⌘V.
+        logPasteRoute(route, target: target, event: "session completion")
+        if !text.isEmpty, PasteRouter.shouldPrepublishLocalClipboard(for: route) {
+            // Publish the final text before returning focus to UU. This gives
+            // compatibility mode time to sync and makes direct mode converge
+            // both clipboards before its POST/ACK/paste authorization flow.
+            if route == .uuDirect {
+                logPasteRoute(route, target: target, event: "direct local prepublish before target restoration")
+            }
             PasteHelper.copyOnly(text)
         }
         closeSession()
@@ -260,7 +263,7 @@ final class InputMethodSessionManager {
                 self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
                     guard let self, self.pasteGeneration == generation else { return }
                     guard isFrontmost else {
-                        print("[InputMethodSessionManager] ⚠️ UU target was not restored; not sending direct clipboard request")
+                        self.logPasteRoute(route, target: target, event: "direct target unavailable before POST")
                         self.handleDirectPasteOutcome(.targetUnavailableBeforeRequest, text: text)
                         return
                     }
@@ -361,13 +364,22 @@ final class InputMethodSessionManager {
                 }
             }
             do {
+                self.logPasteRoute(.uuDirect, target: target, event: "direct POST start")
                 _ = try await RemoteClipboardClient().write(text: text)
                 guard !Task.isCancelled, self.pasteGeneration == generation else { return }
-                guard self.isPasteTargetFrontmost(target) else {
+                self.logPasteRoute(.uuDirect, target: target, event: "direct ACK success")
+                let targetIsFrontmost = self.isPasteTargetFrontmost(target)
+                self.logPasteRoute(
+                    .uuDirect,
+                    target: target,
+                    event: "direct focus recheck frontmost=\(targetIsFrontmost)"
+                )
+                guard targetIsFrontmost else {
                     print("[InputMethodSessionManager] ⚠️ Direct clipboard ACK arrived after target focus changed; not pasting")
                     self.handleDirectPasteOutcome(.targetFocusChangedAfterAcknowledgement, text: text)
                     return
                 }
+                self.logPasteRoute(.uuDirect, target: target, event: "direct paste execution")
                 PasteHelper.pasteOnly()
             } catch is CancellationError {
                 // A new session, ESC, stop, or termination intentionally owns
@@ -389,6 +401,12 @@ final class InputMethodSessionManager {
                 self?.directPasteFailurePresenter.present(prompt, onSwitchToCompatibility: onSwitchToCompatibility)
             }
         )
+    }
+
+    private func logPasteRoute(_ route: PasteRoute, target: NSRunningApplication?, event: String) {
+        let bundleIdentifier = target?.bundleIdentifier ?? "<none>"
+        let processIdentifier = target.map(\.processIdentifier) ?? -1
+        print("[InputMethodSessionManager] route=\(route) targetBundle=\(bundleIdentifier) targetPID=\(processIdentifier) event=\(event)")
     }
 
     private func setFunctionKeyPressed(_ isPressed: Bool) {

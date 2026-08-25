@@ -55,6 +55,14 @@ final class PasteRouterTests: XCTestCase {
         }
     }
 
+    func testRemoteRoutesPrepublishClipboardWithoutAuthorizingPaste() {
+        XCTAssertFalse(PasteRouter.shouldPrepublishLocalClipboard(for: .local))
+        XCTAssertTrue(PasteRouter.shouldPrepublishLocalClipboard(for: .uuCompatibility))
+        XCTAssertTrue(PasteRouter.shouldPrepublishLocalClipboard(for: .uuDirect))
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .remoteWriteFailed).shouldPaste)
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetUnavailableBeforeRequest).shouldPaste)
+    }
+
     func testDirectWriteFailureCopiesTextPresentsExactPromptAndNeverPastesOrDowngrades() {
         let settings = PasteRoutingSettings(defaults: defaults)
         settings.uuPasteMode = .direct
