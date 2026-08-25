@@ -1,3 +1,4 @@
 build/
+build-tests/
 .DS_Store
 *.xcodeproj/

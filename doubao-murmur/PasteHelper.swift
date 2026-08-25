@@ -30,7 +30,19 @@ struct PasteHelper {
         pasteWorkItem = nil
     }
 
-    static func copyAndPaste(_ text: String) {
+    /// Local applications do not need UU's remote clipboard settling or
+    /// defensive rewrites: restore focus, write once, then paste immediately.
+    static func copyAndPasteLocally(_ text: String) {
+        cancelPendingPaste()
+        guard writeClipboard(text) else { return }
+        log("⌘V locally")
+        pasteOnly()
+    }
+
+    /// Compatibility path for UU's local → remote clipboard synchronisation.
+    /// This intentionally preserves the existing quiet-period and defensive
+    /// rewrite algorithm, including a user-customised value.
+    static func copyAndPasteForUUCompatibility(_ text: String) {
         cancelPendingPaste()
         let existing = NSPasteboard.general.string(forType: .string)
         if existing == text {
@@ -47,6 +59,11 @@ struct PasteHelper {
 
     static func copyOnly(_ text: String) {
         _ = writeClipboard(text)
+    }
+
+    /// Used only after a direct remote clipboard ACK has been verified.
+    static func pasteOnly() {
+        simulatePaste()
     }
 
     /// UU bidirectional clipboard:

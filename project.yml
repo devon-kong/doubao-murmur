@@ -47,6 +47,22 @@ targets:
       path: doubao-murmur/doubao-murmur.entitlements
       properties:
         com.apple.security.app-sandbox: false
+    scheme:
+      testTargets:
+        - doubao-murmurTests
+
+  doubao-murmurTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: doubao-murmurTests
+    dependencies:
+      - target: doubao-murmur
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Doubao Murmur.app/Contents/MacOS/Doubao Murmur"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
   murmur-mirror:
     type: tool

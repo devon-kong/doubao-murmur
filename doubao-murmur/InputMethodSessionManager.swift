@@ -34,6 +34,8 @@ final class InputMethodSessionManager {
     private var finalTextQuietWorkItem: DispatchWorkItem?
     private var stopSafetyWorkItem: DispatchWorkItem?
     private var clipboardPublishWorkItem: DispatchWorkItem?
+    private var directPasteTask: Task<Void, Never>?
+    private var pasteGeneration = UUID()
     private var previousFrontmostApp: NSRunningApplication?
     private var pasteTargetApp: NSRunningApplication?
     private var transcriptionTextObservation: AnyCancellable?
@@ -76,9 +78,6 @@ final class InputMethodSessionManager {
 
     func stop() {
         cancelSession()
-        clipboardPublishWorkItem?.cancel()
-        clipboardPublishWorkItem = nil
-        PasteHelper.cancelPendingPaste()
         transcriptionTextObservation?.cancel()
         transcriptionTextObservation = nil
         hotkeyManager.stop()
@@ -101,11 +100,11 @@ final class InputMethodSessionManager {
             return
         }
 
-        clipboardPublishWorkItem?.cancel()
-        clipboardPublishWorkItem = nil
-        PasteHelper.cancelPendingPaste()
+        invalidatePendingPaste()
         previousFrontmostApp = NSWorkspace.shared.frontmostApplication
-        pasteTargetApp = nil
+        // Capture the destination at recording start. Do not infer it from a
+        // window title or from whichever process is frontmost after dictation.
+        pasteTargetApp = previousFrontmostApp
 
         phase = .preparing
         appState.transcriptionText = ""
@@ -205,7 +204,10 @@ final class InputMethodSessionManager {
     private func completeSession() {
         guard phase == .stopping else { return }
         let text = trimmedTranscriptionText
-        if !text.isEmpty {
+        let target = pasteTargetApp
+        let route = PasteRouter().route(for: target)
+        let generation = pasteGeneration
+        if !text.isEmpty, route == .uuCompatibility {
             // Publish the final text to the local clipboard *before* returning
             // focus to UU. UU's local → remote clipboard sync is the slow step
             // (it is what made pastes lag one session behind); the earlier the
@@ -216,43 +218,79 @@ final class InputMethodSessionManager {
         if text.isEmpty {
             print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")
         } else {
-            scheduleClipboardPaste(text)
+            schedulePaste(text, route: route, target: target, generation: generation)
         }
         print("[InputMethodSessionManager] ✅ Session completed (text length: \(text.count))")
     }
 
-    /// Wait until the previous app is frontmost, then publish. UU's inbound
-    /// remote clipboard sync is racy: a fixed 0.15s delay is sometimes too
-    /// short, and the board can still be overwritten after the first write.
-    private func scheduleClipboardPaste(_ text: String) {
+    private func schedulePaste(
+        _ text: String,
+        route: PasteRoute,
+        target: NSRunningApplication?,
+        generation: UUID
+    ) {
         clipboardPublishWorkItem?.cancel()
         PasteHelper.cancelPendingPaste()
-        waitUntilPasteTargetIsFrontmost(attemptsRemaining: Int(Self.frontmostWaitBudget / Self.frontmostPollInterval)) { [weak self] in
-            guard self != nil else { return }
-            PasteHelper.copyAndPaste(text)
-        }
+        PasteRouter.execute(
+            route,
+            local: { [weak self] in
+                self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
+                    guard isFrontmost else {
+                        print("[InputMethodSessionManager] ⚠️ Local target was not restored; not pasting")
+                        return
+                    }
+                    PasteHelper.copyAndPasteLocally(text)
+                }
+            },
+            uuCompatibility: { [weak self] in
+                self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
+                    if !isFrontmost {
+                        // Preserve the established UU compatibility behaviour:
+                        // its defensive clipboard algorithm still owns timing.
+                        print("[InputMethodSessionManager] ⚠️ UU target did not become frontmost before compatibility paste")
+                    }
+                    PasteHelper.copyAndPasteForUUCompatibility(text)
+                }
+            },
+            uuDirect: { [weak self] in
+                self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
+                    guard let self, isFrontmost else {
+                        print("[InputMethodSessionManager] ⚠️ UU target was not restored; not sending direct clipboard request")
+                        return
+                    }
+                    self.startDirectPaste(text, target: target, generation: generation)
+                }
+            }
+        )
     }
 
-    private func waitUntilPasteTargetIsFrontmost(attemptsRemaining: Int, then work: @escaping () -> Void) {
-        let target = pasteTargetApp
-        let isReady = target == nil
-            || target?.isTerminated == true
-            || NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier
-        if isReady || attemptsRemaining <= 0 {
-            if !isReady {
-                print("[InputMethodSessionManager] ⚠️ Timed out waiting for previous app to become frontmost; publishing clipboard anyway")
-            }
-            work()
+    private func waitUntilPasteTargetIsFrontmost(
+        target: NSRunningApplication?,
+        attemptsRemaining: Int? = nil,
+        generation: UUID,
+        then work: @escaping (Bool) -> Void
+    ) {
+        guard generation == pasteGeneration else { return }
+        let remainingAttempts = attemptsRemaining ?? Int(Self.frontmostWaitBudget / Self.frontmostPollInterval)
+        let isReady = isPasteTargetFrontmost(target)
+        if isReady || remainingAttempts <= 0 {
+            work(isReady)
             return
         }
         let workItem = DispatchWorkItem { [weak self] in
-            self?.waitUntilPasteTargetIsFrontmost(attemptsRemaining: attemptsRemaining - 1, then: work)
+            self?.waitUntilPasteTargetIsFrontmost(
+                target: target,
+                attemptsRemaining: remainingAttempts - 1,
+                generation: generation,
+                then: work
+            )
         }
         clipboardPublishWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.frontmostPollInterval, execute: workItem)
     }
 
     private func cancelSession() {
+        invalidatePendingPaste()
         guard phase != .idle else { return }
         closeSession()
         print("[InputMethodSessionManager] Session cancelled and previous input source restored")
@@ -280,7 +318,6 @@ final class InputMethodSessionManager {
     private func activatePreviousFrontmostApp() {
         let app = previousFrontmostApp
         previousFrontmostApp = nil
-        pasteTargetApp = app
         guard let app, !app.isTerminated else { return }
         if #available(macOS 14.0, *) {
             _ = app.activate()
@@ -291,6 +328,48 @@ final class InputMethodSessionManager {
 
     private var trimmedTranscriptionText: String {
         overlayPanel.currentText().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func invalidatePendingPaste() {
+        pasteGeneration = UUID()
+        clipboardPublishWorkItem?.cancel()
+        clipboardPublishWorkItem = nil
+        directPasteTask?.cancel()
+        directPasteTask = nil
+        PasteHelper.cancelPendingPaste()
+    }
+
+    private func isPasteTargetFrontmost(_ target: NSRunningApplication?) -> Bool {
+        guard let target else { return true }
+        guard !target.isTerminated else { return false }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier
+    }
+
+    private func startDirectPaste(_ text: String, target: NSRunningApplication?, generation: UUID) {
+        directPasteTask?.cancel()
+        directPasteTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.pasteGeneration == generation {
+                    self.directPasteTask = nil
+                }
+            }
+            do {
+                _ = try await RemoteClipboardClient().write(text: text)
+                guard !Task.isCancelled, self.pasteGeneration == generation else { return }
+                guard self.isPasteTargetFrontmost(target) else {
+                    print("[InputMethodSessionManager] ⚠️ Direct clipboard ACK arrived after target focus changed; not pasting")
+                    return
+                }
+                PasteHelper.pasteOnly()
+            } catch is CancellationError {
+                // A new session, ESC, stop, or termination intentionally owns
+                // cancellation; a late ACK must never paste into another app.
+            } catch {
+                guard !Task.isCancelled, self.pasteGeneration == generation else { return }
+                print("[InputMethodSessionManager] ⚠️ Direct clipboard request failed; not pasting")
+            }
+        }
     }
 
     private func setFunctionKeyPressed(_ isPressed: Bool) {

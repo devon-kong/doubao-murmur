@@ -52,6 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makeUUPasteModeItem())
         menu.addItem(makePasteDelayItem())
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "使用帮助", action: #selector(showHelp), keyEquivalent: "h"))
@@ -63,14 +64,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Inline paste-delay editor: the field always shows the current value;
     /// the stepper applies ±0.25s immediately, typing + Return also works.
     private func makePasteDelayItem() -> NSMenuItem {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 28))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 28))
 
-        let label = NSTextField(labelWithString: "粘贴等待时间(秒)")
+        let label = NSTextField(labelWithString: "兼容模式等待时间(秒)")
         label.font = NSFont.menuFont(ofSize: 13)
-        label.frame = NSRect(x: 20, y: 4, width: 118, height: 20)
+        label.frame = NSRect(x: 20, y: 4, width: 132, height: 20)
         container.addSubview(label)
 
-        let stepper = NSStepper(frame: NSRect(x: 212, y: 2, width: 20, height: 24))
+        let stepper = NSStepper(frame: NSRect(x: 232, y: 2, width: 20, height: 24))
         stepper.minValue = 0.25
         stepper.maxValue = 10
         stepper.increment = 0.25
@@ -80,7 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         stepper.action = #selector(pasteDelayStepperChanged(_:))
         container.addSubview(stepper)
 
-        let field = NSTextField(frame: NSRect(x: 146, y: 2, width: 58, height: 24))
+        let field = NSTextField(frame: NSRect(x: 166, y: 2, width: 58, height: 24))
         field.tag = Self.pasteDelayFieldTag
         field.stringValue = String(format: "%g", PasteHelper.remoteSyncQuietPeriod)
         field.alignment = .right
@@ -91,6 +92,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem()
         item.view = container
         return item
+    }
+
+    private func makeUUPasteModeItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "UU 远程粘贴方式", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let currentMode = PasteRoutingSettings().uuPasteMode
+        for mode in UUPasteMode.allCases {
+            let modeItem = NSMenuItem(title: mode.menuTitle, action: #selector(uuPasteModeChanged(_:)), keyEquivalent: "")
+            modeItem.target = self
+            modeItem.representedObject = mode.rawValue
+            modeItem.state = mode == currentMode ? .on : .off
+            submenu.addItem(modeItem)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func uuPasteModeChanged(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let mode = UUPasteMode(rawValue: rawValue) else { return }
+        let settings = PasteRoutingSettings()
+        settings.uuPasteMode = mode
+        print("[AppDelegate] UU paste mode set to \(mode.rawValue)")
+        rebuildMenu()
     }
 
     private static let pasteDelayFieldTag = 1001
