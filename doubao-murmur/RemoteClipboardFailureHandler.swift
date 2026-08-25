@@ -4,6 +4,7 @@ import Foundation
 enum DirectPasteOutcome {
     case remoteWriteFailed
     case cancelledOrStale
+    case targetUnavailableBeforeRequest
     case targetFocusChangedAfterAcknowledgement
 }
 
@@ -38,6 +39,8 @@ struct DirectPasteFailureHandler {
             return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: true, shouldPaste: false)
         case .cancelledOrStale:
             return DirectPasteFailurePlan(shouldCopyLocally: false, shouldPresentWriteFailure: false, shouldPaste: false)
+        case .targetUnavailableBeforeRequest:
+            return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: false, shouldPaste: false)
         case .targetFocusChangedAfterAcknowledgement:
             return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: false, shouldPaste: false)
         }

@@ -258,8 +258,10 @@ final class InputMethodSessionManager {
             },
             uuDirect: { [weak self] in
                 self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
-                    guard let self, isFrontmost else {
+                    guard let self, self.pasteGeneration == generation else { return }
+                    guard isFrontmost else {
                         print("[InputMethodSessionManager] ⚠️ UU target was not restored; not sending direct clipboard request")
+                        self.handleDirectPasteOutcome(.targetUnavailableBeforeRequest, text: text)
                         return
                     }
                     self.startDirectPaste(text, target: target, generation: generation)

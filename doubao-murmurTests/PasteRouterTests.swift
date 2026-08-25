@@ -134,4 +134,27 @@ final class PasteRouterTests: XCTestCase {
         XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetFocusChangedAfterAcknowledgement).shouldPresentWriteFailure)
         XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetFocusChangedAfterAcknowledgement).shouldPaste)
     }
+
+    func testUnavailableTargetBeforeDirectRequestSavesTextWithoutPromptPasteOrModeChange() {
+        let settings = PasteRoutingSettings(defaults: defaults)
+        settings.uuPasteMode = .direct
+        let handler = DirectPasteFailureHandler(settings: settings)
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+
+        handler.handle(
+            outcome: .targetUnavailableBeforeRequest,
+            text: "test transcription",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertEqual(copiedTexts, ["test transcription"])
+        XCTAssertTrue(presentedPrompts.isEmpty)
+        XCTAssertEqual(settings.uuPasteMode, .direct)
+        XCTAssertEqual(
+            DirectPasteFailureHandler.plan(for: .targetUnavailableBeforeRequest),
+            DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: false, shouldPaste: false)
+        )
+    }
 }
