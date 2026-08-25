@@ -2,12 +2,27 @@ import Foundation
 import AppKit
 
 struct PasteHelper {
+    /// UserDefaults key for the user-configurable paste quiet period.
+    static let quietPeriodDefaultsKey = "pasteQuietPeriodSeconds"
+    /// Verified against UU remote on a normal network; 0.25s was observed to
+    /// paste the previous session's text when the network got slower.
+    static let defaultQuietPeriod: TimeInterval = 1.0
+
     /// How long the local clipboard must keep *this* session's text before ⌘V.
     /// UU's ⌘V uses the *remote* clipboard; this quiet window is the outbound
-    /// sync from the local Mac to the controlled machine.
-    private static let remoteSyncQuietPeriod: TimeInterval = 0.25
+    /// sync from the local Mac to the controlled machine. User-configurable
+    /// from the status-bar menu because UU's sync latency varies by network.
+    static var remoteSyncQuietPeriod: TimeInterval {
+        let stored = UserDefaults.standard.double(forKey: quietPeriodDefaultsKey)
+        return stored > 0 ? stored : defaultQuietPeriod
+    }
+
+    static func setQuietPeriod(_ value: TimeInterval) {
+        UserDefaults.standard.set(value, forKey: quietPeriodDefaultsKey)
+    }
+
     private static let pollInterval: TimeInterval = 0.05
-    private static let defendTimeout: TimeInterval = 1.50
+    private static var defendTimeout: TimeInterval { remoteSyncQuietPeriod + 1.5 }
     private static var pasteWorkItem: DispatchWorkItem?
 
     static func cancelPendingPaste() {
@@ -19,11 +34,14 @@ struct PasteHelper {
         cancelPendingPaste()
         let existing = NSPasteboard.general.string(forType: .string)
         if existing == text {
-            print("[PasteHelper] local clipboard already has this text; still waiting for remote sync")
+            // Already on the board (written at session finalize). Do NOT
+            // rewrite: a changeCount bump can reset UU's outbound-sync
+            // debounce and push the remote update past our ⌘V.
+            log("local clipboard already has this text; defending without rewrite")
         } else {
-            print("[PasteHelper] local clipboard differs (now \(existing?.count ?? 0) chars); treating as remote X")
+            log("local clipboard differs (now \(existing?.count ?? 0) chars); writing this session's text")
+            guard writeClipboard(text) else { return }
         }
-        guard writeClipboard(text) else { return }
         defendThenPaste(text)
     }
 
@@ -46,7 +64,7 @@ struct PasteHelper {
             let now = Date()
             let current = NSPasteboard.general.string(forType: .string)
             if current != text {
-                print("[PasteHelper] clipboard stolen (now \(current?.count ?? 0) chars); rewriting this session's text")
+                log("clipboard stolen (now \(current?.count ?? 0) chars); rewriting this session's text")
                 guard writeClipboard(text) else { return }
                 stableSince = Date()
             }
@@ -57,14 +75,14 @@ struct PasteHelper {
                 if NSPasteboard.general.string(forType: .string) != text {
                     _ = writeClipboard(text)
                     let retry = DispatchWorkItem {
-                        print("[PasteHelper] ⌘V after timeout rewrite")
+                        log("⌘V after timeout rewrite")
                         simulatePaste()
                     }
                     pasteWorkItem = retry
                     DispatchQueue.main.asyncAfter(deadline: .now() + remoteSyncQuietPeriod, execute: retry)
                     return
                 }
-                print("[PasteHelper] ⌘V (stable \(String(format: "%.2f", stableElapsed))s)")
+                log("⌘V (stable \(String(format: "%.2f", stableElapsed))s)")
                 simulatePaste()
                 return
             }
@@ -77,16 +95,30 @@ struct PasteHelper {
         tick()
     }
 
+    private static func log(_ message: String) {
+        print("[PasteHelper \(Self.timestamp())] \(message)")
+    }
+
+    private static func timestamp() -> String {
+        let now = Date()
+        let calendar = Calendar.current
+        let h = calendar.component(.hour, from: now)
+        let m = calendar.component(.minute, from: now)
+        let s = calendar.component(.second, from: now)
+        let ms = calendar.component(.nanosecond, from: now) / 1_000_000
+        return String(format: "%02d:%02d:%02d.%03d", h, m, s, ms)
+    }
+
     @discardableResult
     private static func writeClipboard(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
-            print("[PasteHelper] ❌ Failed to write transcription text to the clipboard")
+            log("❌ Failed to write transcription text to the clipboard")
             return false
         }
-        print("[PasteHelper] ✅ Copied transcription text (length: \(text.count))")
+        log("✅ Copied transcription text (length: \(text.count))")
         return true
     }
 

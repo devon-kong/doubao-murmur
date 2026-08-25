@@ -205,6 +205,13 @@ final class InputMethodSessionManager {
     private func completeSession() {
         guard phase == .stopping else { return }
         let text = trimmedTranscriptionText
+        if !text.isEmpty {
+            // Publish the final text to the local clipboard *before* returning
+            // focus to UU. UU's local → remote clipboard sync is the slow step
+            // (it is what made pastes lag one session behind); the earlier the
+            // text is on the board, the longer UU has to push it before ⌘V.
+            PasteHelper.copyOnly(text)
+        }
         closeSession()
         if text.isEmpty {
             print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")

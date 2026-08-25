@@ -6,28 +6,58 @@ struct OverlayView: View {
     let onTextViewReady: (NSTextView) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(Color.red)
-                .frame(width: 9, height: 9)
-                .opacity(appState.recordingState == .recording ? 1 : 0.55)
+        HStack(spacing: 12) {
+            RecordingDot(state: appState.recordingState)
 
             IMETextView(
                 text: $appState.transcriptionText,
                 onTextViewReady: onTextViewReady
             )
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(white: 0.2).opacity(0.95))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(0.6)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
         )
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+    }
+}
+
+/// Status indicator: a soft dot that breathes while recording and stays
+/// quiet otherwise. Color carries the state, so no text label is needed.
+private struct RecordingDot: View {
+    let state: RecordingState
+    @State private var breathing = false
+
+    private var color: Color {
+        switch state {
+        case .recording: return .red
+        case .starting, .stopping: return .orange
+        case .idle: return .gray
+        }
+    }
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 8, height: 8)
+            .shadow(color: color.opacity(0.6), radius: 3)
+            .scaleEffect(breathing && state == .recording ? 1.35 : 1.0)
+            .opacity(state == .recording ? (breathing ? 0.65 : 1.0) : 0.8)
+            .animation(
+                state == .recording
+                    ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                    : .default,
+                value: breathing
+            )
+            .onAppear { breathing = true }
     }
 }
 
@@ -50,9 +80,9 @@ private struct IMETextView: NSViewRepresentable {
         let textView = NSTextView()
         textView.delegate = context.coordinator
         textView.string = text
-        textView.font = .systemFont(ofSize: 14)
-        textView.textColor = .white
-        textView.insertionPointColor = .white
+        textView.font = .systemFont(ofSize: 15)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .labelColor
         textView.drawsBackground = false
         textView.isRichText = false
         textView.isEditable = true

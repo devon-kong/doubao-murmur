@@ -52,10 +52,74 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makePasteDelayItem())
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "使用帮助", action: #selector(showHelp), keyEquivalent: "h"))
         menu.addItem(NSMenuItem(title: "检查更新", action: #selector(checkForUpdates), keyEquivalent: "u"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
+    }
+
+    /// Inline paste-delay editor: the field always shows the current value;
+    /// the stepper applies ±0.25s immediately, typing + Return also works.
+    private func makePasteDelayItem() -> NSMenuItem {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 28))
+
+        let label = NSTextField(labelWithString: "粘贴等待时间(秒)")
+        label.font = NSFont.menuFont(ofSize: 13)
+        label.frame = NSRect(x: 20, y: 4, width: 118, height: 20)
+        container.addSubview(label)
+
+        let stepper = NSStepper(frame: NSRect(x: 212, y: 2, width: 20, height: 24))
+        stepper.minValue = 0.25
+        stepper.maxValue = 10
+        stepper.increment = 0.25
+        stepper.valueWraps = false
+        stepper.doubleValue = PasteHelper.remoteSyncQuietPeriod
+        stepper.target = self
+        stepper.action = #selector(pasteDelayStepperChanged(_:))
+        container.addSubview(stepper)
+
+        let field = NSTextField(frame: NSRect(x: 146, y: 2, width: 58, height: 24))
+        field.tag = Self.pasteDelayFieldTag
+        field.stringValue = String(format: "%g", PasteHelper.remoteSyncQuietPeriod)
+        field.alignment = .right
+        field.target = self
+        field.action = #selector(pasteDelayFieldChanged(_:))
+        container.addSubview(field)
+
+        let item = NSMenuItem()
+        item.view = container
+        return item
+    }
+
+    private static let pasteDelayFieldTag = 1001
+
+    @objc private func pasteDelayStepperChanged(_ sender: NSStepper) {
+        // Round to 2 decimals so 0.25 steps never accumulate float dust.
+        let value = (sender.doubleValue * 100).rounded() / 100
+        PasteHelper.setQuietPeriod(value)
+        if let field = sender.superview?.viewWithTag(Self.pasteDelayFieldTag) as? NSTextField {
+            field.stringValue = String(format: "%g", value)
+        }
+        print("[AppDelegate] Paste quiet period set to \(value)s (stepper)")
+    }
+
+    @objc private func pasteDelayFieldChanged(_ sender: NSTextField) {
+        let raw = sender.stringValue
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(raw), value >= 0.1, value <= 10 else {
+            NSSound.beep()
+            sender.stringValue = String(format: "%g", PasteHelper.remoteSyncQuietPeriod)
+            return
+        }
+        PasteHelper.setQuietPeriod(value)
+        sender.stringValue = String(format: "%g", value)
+        if let stepper = sender.superview?.subviews.compactMap({ $0 as? NSStepper }).first {
+            stepper.doubleValue = value
+        }
+        print("[AppDelegate] Paste quiet period set to \(value)s")
     }
 
     @objc private func showHelp() {
@@ -74,6 +138,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         2. 第一次按 ⌃ Control + /，应用会打开输入框、切换豆包输入法并自动开始语音输入
         3. 第二次按 ⌃ Control + /，应用会停止语音输入，等待文字稳定后自动复制粘贴
         4. 按 ESC 取消本次输入，不复制粘贴，并恢复原来的输入法
+
+        如果使用 UU 远程时粘贴出来的是上一次的内容，请在菜单的「粘贴等待时间」输入框中调大秒数后回车。
 
         如果豆包输入法未安装或未启用，本次会话不会开始。
         """
