@@ -368,13 +368,28 @@ final class InputMethodSessionManager {
                 _ = try await RemoteClipboardClient().write(text: text)
                 guard !Task.isCancelled, self.pasteGeneration == generation else { return }
                 self.logPasteRoute(.uuDirect, target: target, event: "direct ACK success")
+                self.logPasteRoute(
+                    .uuDirect,
+                    target: target,
+                    event: "direct settle start delay=\(String(format: "%.2f", DirectPasteSettlePolicy.delay))s"
+                )
+                try await Task.sleep(nanoseconds: DirectPasteSettlePolicy.delayNanoseconds)
+                guard !Task.isCancelled, self.pasteGeneration == generation else { return }
+                self.logPasteRoute(.uuDirect, target: target, event: "direct settle end")
                 let targetIsFrontmost = self.isPasteTargetFrontmost(target)
                 self.logPasteRoute(
                     .uuDirect,
                     target: target,
-                    event: "direct focus recheck frontmost=\(targetIsFrontmost)"
+                    event: "direct final focus recheck frontmost=\(targetIsFrontmost)"
                 )
-                guard targetIsFrontmost else {
+                let canPaste = DirectPasteSettlePolicy.shouldPaste(
+                    delayHasElapsed: true,
+                    taskIsCancelled: Task.isCancelled,
+                    generationMatches: self.pasteGeneration == generation,
+                    targetIsFrontmost: targetIsFrontmost
+                )
+                guard canPaste else {
+                    guard !Task.isCancelled, self.pasteGeneration == generation else { return }
                     print("[InputMethodSessionManager] ⚠️ Direct clipboard ACK arrived after target focus changed; not pasting")
                     self.handleDirectPasteOutcome(.targetFocusChangedAfterAcknowledgement, text: text)
                     return

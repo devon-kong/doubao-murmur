@@ -19,6 +19,30 @@ enum PasteRoute: Equatable {
     case uuDirect
 }
 
+/// Fast mode still needs a short post-ACK settling window for UU's restored
+/// foreground window to become ready to receive synthetic keyboard input.
+/// 0.30 seconds is a conservative initial test value: manual paste succeeded
+/// after roughly one second in the observed failure case. It is not a
+/// validated timing constant and must be verified on the real UU path.
+/// This is intentionally independent from the user's compatibility-mode
+/// clipboard quiet period.
+enum DirectPasteSettlePolicy {
+    static let delay: TimeInterval = 0.30
+
+    static var delayNanoseconds: UInt64 {
+        UInt64(delay * 1_000_000_000)
+    }
+
+    static func shouldPaste(
+        delayHasElapsed: Bool,
+        taskIsCancelled: Bool,
+        generationMatches: Bool,
+        targetIsFrontmost: Bool
+    ) -> Bool {
+        delayHasElapsed && !taskIsCancelled && generationMatches && targetIsFrontmost
+    }
+}
+
 /// Persisted independently from the existing quiet-period value. An absent or
 /// invalid value intentionally keeps every upgrading user on compatibility.
 struct PasteRoutingSettings {

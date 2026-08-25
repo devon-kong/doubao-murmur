@@ -63,6 +63,53 @@ final class PasteRouterTests: XCTestCase {
         XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetUnavailableBeforeRequest).shouldPaste)
     }
 
+    func testDirectPasteSettleGateDoesNotPasteBeforeDelay() {
+        XCTAssertEqual(DirectPasteSettlePolicy.delay, 0.30, accuracy: 0.0001)
+        XCTAssertFalse(
+            DirectPasteSettlePolicy.shouldPaste(
+                delayHasElapsed: false,
+                taskIsCancelled: false,
+                generationMatches: true,
+                targetIsFrontmost: true
+            )
+        )
+    }
+
+    func testDirectPasteSettleGatePastesOnlyAfterDelayWithCurrentTargetAndGeneration() {
+        XCTAssertTrue(
+            DirectPasteSettlePolicy.shouldPaste(
+                delayHasElapsed: true,
+                taskIsCancelled: false,
+                generationMatches: true,
+                targetIsFrontmost: true
+            )
+        )
+        XCTAssertFalse(
+            DirectPasteSettlePolicy.shouldPaste(
+                delayHasElapsed: true,
+                taskIsCancelled: false,
+                generationMatches: false,
+                targetIsFrontmost: true
+            )
+        )
+        XCTAssertFalse(
+            DirectPasteSettlePolicy.shouldPaste(
+                delayHasElapsed: true,
+                taskIsCancelled: false,
+                generationMatches: true,
+                targetIsFrontmost: false
+            )
+        )
+        XCTAssertFalse(
+            DirectPasteSettlePolicy.shouldPaste(
+                delayHasElapsed: true,
+                taskIsCancelled: true,
+                generationMatches: true,
+                targetIsFrontmost: true
+            )
+        )
+    }
+
     func testDirectWriteFailureCopiesTextPresentsExactPromptAndNeverPastesOrDowngrades() {
         let settings = PasteRoutingSettings(defaults: defaults)
         settings.uuPasteMode = .direct
