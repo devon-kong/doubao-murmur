@@ -47,3 +47,15 @@ targets:
       path: doubao-murmur/doubao-murmur.entitlements
       properties:
         com.apple.security.app-sandbox: false
+
+  murmur-mirror:
+    type: tool
+    platform: macOS
+    sources:
+      - path: murmur-mirror
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.doubao.murmur.mirror
+        PRODUCT_NAME: murmur-mirror
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
