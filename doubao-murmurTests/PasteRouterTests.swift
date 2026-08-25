@@ -54,4 +54,84 @@ final class PasteRouterTests: XCTestCase {
             XCTAssertEqual(calls, [route])
         }
     }
+
+    func testDirectWriteFailureCopiesTextPresentsExactPromptAndNeverPastesOrDowngrades() {
+        let settings = PasteRoutingSettings(defaults: defaults)
+        settings.uuPasteMode = .direct
+        let handler = DirectPasteFailureHandler(settings: settings)
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+
+        handler.handle(
+            outcome: .remoteWriteFailed,
+            text: "test transcription",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertEqual(copiedTexts, ["test transcription"])
+        XCTAssertEqual(presentedPrompts, [.writeFailure])
+        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.title, "被控制端剪贴板写入失败")
+        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.message, "请检查被控制端助手和 UU 端口映射，或切换到兼容模式。")
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .remoteWriteFailed).shouldPaste)
+        XCTAssertEqual(settings.uuPasteMode, .direct)
+    }
+
+    func testSelectingCompatibilityOnlyChangesFutureModeInIsolatedDefaults() {
+        defaults.set(0.5, forKey: PasteHelper.quietPeriodDefaultsKey)
+        let settings = PasteRoutingSettings(defaults: defaults)
+        settings.uuPasteMode = .direct
+        let handler = DirectPasteFailureHandler(settings: settings)
+        var switchToCompatibility: (() -> Void)?
+
+        handler.handle(
+            outcome: .remoteWriteFailed,
+            text: "test transcription",
+            copyTextLocally: { _ in },
+            present: { _, action in switchToCompatibility = action }
+        )
+        XCTAssertEqual(settings.uuPasteMode, .direct)
+
+        switchToCompatibility?()
+        XCTAssertEqual(settings.uuPasteMode, .compatibility)
+        XCTAssertEqual(defaults.double(forKey: PasteHelper.quietPeriodDefaultsKey), 0.5, accuracy: 0.0001)
+    }
+
+    func testCancelledOrStaleOutcomeHasNoEffects() {
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+
+        handler.handle(
+            outcome: .cancelledOrStale,
+            text: "test transcription",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertTrue(copiedTexts.isEmpty)
+        XCTAssertTrue(presentedPrompts.isEmpty)
+        XCTAssertEqual(
+            DirectPasteFailureHandler.plan(for: .cancelledOrStale),
+            DirectPasteFailurePlan(shouldCopyLocally: false, shouldPresentWriteFailure: false, shouldPaste: false)
+        )
+    }
+
+    func testFocusChangeAfterAcknowledgementIsNotClassifiedAsWriteFailure() {
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+
+        handler.handle(
+            outcome: .targetFocusChangedAfterAcknowledgement,
+            text: "test transcription",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertEqual(copiedTexts, ["test transcription"])
+        XCTAssertTrue(presentedPrompts.isEmpty)
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetFocusChangedAfterAcknowledgement).shouldPresentWriteFailure)
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .targetFocusChangedAfterAcknowledgement).shouldPaste)
+    }
 }

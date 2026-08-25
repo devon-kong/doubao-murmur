@@ -26,6 +26,8 @@ final class InputMethodSessionManager {
     private let appState: AppState
     private let overlayPanel: OverlayPanel
     private let hotkeyManager: HotkeyManager
+    private let directPasteFailureHandler: DirectPasteFailureHandler
+    private let directPasteFailurePresenter: RemoteClipboardFailurePresenting
     private let inputSourceManager = InputSourceManager()
     private var phase: SessionPhase = .idle
     private var functionKeyIsDown = false
@@ -44,6 +46,8 @@ final class InputMethodSessionManager {
         self.appState = appState
         self.overlayPanel = overlayPanel
         self.hotkeyManager = hotkeyManager
+        directPasteFailureHandler = DirectPasteFailureHandler()
+        directPasteFailurePresenter = RemoteClipboardFailurePresenter()
     }
 
     func start() {
@@ -359,6 +363,7 @@ final class InputMethodSessionManager {
                 guard !Task.isCancelled, self.pasteGeneration == generation else { return }
                 guard self.isPasteTargetFrontmost(target) else {
                     print("[InputMethodSessionManager] ⚠️ Direct clipboard ACK arrived after target focus changed; not pasting")
+                    self.handleDirectPasteOutcome(.targetFocusChangedAfterAcknowledgement, text: text)
                     return
                 }
                 PasteHelper.pasteOnly()
@@ -368,8 +373,20 @@ final class InputMethodSessionManager {
             } catch {
                 guard !Task.isCancelled, self.pasteGeneration == generation else { return }
                 print("[InputMethodSessionManager] ⚠️ Direct clipboard request failed; not pasting")
+                self.handleDirectPasteOutcome(.remoteWriteFailed, text: text)
             }
         }
+    }
+
+    private func handleDirectPasteOutcome(_ outcome: DirectPasteOutcome, text: String) {
+        directPasteFailureHandler.handle(
+            outcome: outcome,
+            text: text,
+            copyTextLocally: { PasteHelper.copyOnly($0) },
+            present: { [weak self] prompt, onSwitchToCompatibility in
+                self?.directPasteFailurePresenter.present(prompt, onSwitchToCompatibility: onSwitchToCompatibility)
+            }
+        )
     }
 
     private func setFunctionKeyPressed(_ isPressed: Bool) {
