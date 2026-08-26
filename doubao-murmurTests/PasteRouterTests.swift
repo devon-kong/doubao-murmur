@@ -94,6 +94,81 @@ final class PasteRouterTests: XCTestCase {
         )
     }
 
+    func testCompatibilityLateTickFailsAtDeadlineBeforeClipboardDefense() {
+        let deadline = 100.0
+        for now in [deadline, deadline + 0.001] {
+            XCTAssertEqual(
+                PasteHelper.ClipboardDefensePolicy.decision(
+                    phase: .defendingClipboard,
+                    now: now,
+                    deadline: deadline,
+                    targetIsFrontmost: true,
+                    clipboardMatches: true
+                ),
+                .deadlineExpired,
+                "A late scheduled tick must not reach clipboard defense or Command-V"
+            )
+        }
+    }
+
+    func testCompatibilityInitialUnrestoredTargetFailsBeforeStartingDefense() {
+        XCTAssertEqual(
+            PasteHelper.ClipboardDefensePolicy.initialTargetDecision(targetIsFrontmost: false),
+            .targetNotFrontmost
+        )
+    }
+
+    func testCompatibilityTargetSwitchDuringWaitFailsInDefendingPhase() {
+        XCTAssertEqual(
+            PasteHelper.ClipboardDefensePolicy.decision(
+                phase: .defendingClipboard,
+                now: 99.9,
+                deadline: 100.0,
+                targetIsFrontmost: false,
+                clipboardMatches: true
+            ),
+            .targetNotFrontmost
+        )
+    }
+
+    func testCompatibilityTargetSwitchBeforeEventFailsFinalAuthorization() {
+        XCTAssertEqual(
+            PasteHelper.ClipboardDefensePolicy.decision(
+                phase: .finalEventAuthorization,
+                now: 99.9,
+                deadline: 100.0,
+                targetIsFrontmost: false,
+                clipboardMatches: true
+            ),
+            .targetNotFrontmost
+        )
+    }
+
+    func testCompatibilityHealthyFinalAuthorizationPostsExactlyOneEvent() {
+        let decision = PasteHelper.ClipboardDefensePolicy.decision(
+            phase: .finalEventAuthorization,
+            now: 99.9,
+            deadline: 100.0,
+            targetIsFrontmost: true,
+            clipboardMatches: true
+        )
+        let postedEventCount = decision == .postPasteEvent ? 1 : 0
+        XCTAssertEqual(postedEventCount, 1)
+    }
+
+    func testCompatibilityChangedClipboardResetsStableWindowInsteadOfPosting() {
+        XCTAssertEqual(
+            PasteHelper.ClipboardDefensePolicy.decision(
+                phase: .finalEventAuthorization,
+                now: 99.9,
+                deadline: 100.0,
+                targetIsFrontmost: true,
+                clipboardMatches: false
+            ),
+            .resetStableWindow
+        )
+    }
+
     func testDirectWriteFailureCopiesTextPresentsExactPromptAndNeverPastesOrDowngrades() {
         let settings = PasteRoutingSettings(defaults: defaults)
         settings.uuPasteMode = .direct
@@ -136,24 +211,165 @@ final class PasteRouterTests: XCTestCase {
         XCTAssertEqual(defaults.double(forKey: PasteHelper.quietPeriodDefaultsKey), 0.5, accuracy: 0.0001)
     }
 
-    func testCancelledOrStaleOutcomeHasNoEffects() {
+    func testUnconfirmedDirectOutcomeCopiesTextAndPresentsAmbiguousPrompt() {
         var copiedTexts: [String] = []
         var presentedPrompts: [RemoteClipboardFailurePrompt] = []
         let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
 
         handler.handle(
-            outcome: .cancelledOrStale,
+            outcome: .unconfirmed,
             text: "test transcription",
             copyTextLocally: { copiedTexts.append($0) },
             present: { prompt, _ in presentedPrompts.append(prompt) }
         )
 
-        XCTAssertTrue(copiedTexts.isEmpty)
-        XCTAssertTrue(presentedPrompts.isEmpty)
+        XCTAssertEqual(copiedTexts, ["test transcription"])
+        XCTAssertEqual(presentedPrompts, [.writeFailure])
         XCTAssertEqual(
-            DirectPasteFailureHandler.plan(for: .cancelledOrStale),
-            DirectPasteFailurePlan(shouldCopyLocally: false, shouldPresentWriteFailure: false, shouldPaste: false)
+            DirectPasteFailureHandler.plan(for: .unconfirmed),
+            DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: true, shouldPaste: false)
         )
+    }
+
+    func testBlockedDirectRequestCopiesNewTextButNeverClaimsItMayHaveExecuted() {
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+
+        handler.handle(
+            outcome: .blockedByPreviousUnconfirmedRequest,
+            text: "new transcription",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertEqual(copiedTexts, ["new transcription"])
+        XCTAssertEqual(presentedPrompts, [.requestBlocked])
+        XCTAssertNotEqual(RemoteClipboardFailurePrompt.requestBlocked, .writeFailure)
+        XCTAssertTrue(RemoteClipboardFailurePrompt.requestBlocked.title.contains("未发送"))
+        XCTAssertTrue(RemoteClipboardFailurePrompt.requestBlocked.message.contains("本轮没有发送粘贴请求"))
+        XCTAssertFalse(RemoteClipboardFailurePrompt.requestBlocked.message.contains("本次粘贴可能"))
+    }
+
+    func testBlockedDirectRecordingDoesNotCopyNonexistentNewText() {
+        var copiedTexts: [String] = []
+        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+
+        handler.handle(
+            outcome: .recordingBlockedByPreviousUnconfirmedRequest,
+            text: "text that was never recorded",
+            copyTextLocally: { copiedTexts.append($0) },
+            present: { prompt, _ in presentedPrompts.append(prompt) }
+        )
+
+        XCTAssertTrue(copiedTexts.isEmpty)
+        XCTAssertEqual(presentedPrompts, [.recordingBlocked])
+        XCTAssertTrue(RemoteClipboardFailurePrompt.recordingBlocked.message.contains("录音尚未开始"))
+        XCTAssertTrue(RemoteClipboardFailurePrompt.recordingBlocked.message.contains("没有发送新的粘贴请求"))
+        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .recordingBlockedByPreviousUnconfirmedRequest).shouldCopyLocally)
+    }
+
+    func testDirectGateRefusesSecondRequestWhileFirstIsInFlight() {
+        let first = UUID()
+        let second = UUID()
+        var gate = DirectPasteRequestGate()
+
+        XCTAssertTrue(gate.begin(requestId: first))
+        XCTAssertFalse(gate.begin(requestId: second))
+        XCTAssertEqual(gate.state, .inFlight(first))
+    }
+
+    func testDirectGateKeepsNewRequestsBlockedAfterCancellationOrStaleAcknowledgement() {
+        let first = UUID()
+        let second = UUID()
+        var gate = DirectPasteRequestGate()
+
+        XCTAssertTrue(gate.begin(requestId: first))
+        XCTAssertTrue(gate.markUnconfirmed(requestId: first))
+        XCTAssertEqual(gate.state, .unconfirmed(first))
+        XCTAssertFalse(gate.begin(requestId: second))
+        XCTAssertEqual(gate.state, .unconfirmed(first), "A blocked second request must not replace the old requestId")
+        XCTAssertFalse(gate.acknowledge(requestId: first))
+    }
+
+    func testSwitchingToCompatibilityDoesNotResetUnconfirmedDirectGate() {
+        let first = UUID()
+        let second = UUID()
+        let settings = PasteRoutingSettings(defaults: defaults)
+        settings.uuPasteMode = .direct
+        let handler = DirectPasteFailureHandler(settings: settings)
+        var gate = DirectPasteRequestGate()
+
+        XCTAssertTrue(gate.begin(requestId: first))
+        XCTAssertTrue(gate.markUnconfirmed(requestId: first))
+        handler.switchToCompatibilityForFutureSessions()
+
+        XCTAssertEqual(settings.uuPasteMode, .compatibility)
+        XCTAssertEqual(gate.state, .unconfirmed(first))
+        XCTAssertFalse(gate.begin(requestId: second))
+    }
+
+    func testDirectSessionStartPreflightAllowsIdleGate() {
+        XCTAssertEqual(
+            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: .idle),
+            .start
+        )
+    }
+
+    func testDirectSessionStartPreflightMarksInFlightRequestAndStopsWithoutNewRequest() {
+        let previous = UUID()
+        let wouldBeNewRequest = UUID()
+        var gate = DirectPasteRequestGate()
+        XCTAssertTrue(gate.begin(requestId: previous))
+
+        XCTAssertEqual(
+            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: gate.state),
+            .markInFlightUnconfirmedAndStop
+        )
+        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
+        XCTAssertEqual(gate.state, .unconfirmed(previous))
+        XCTAssertFalse(gate.begin(requestId: wouldBeNewRequest))
+    }
+
+    func testDirectSessionStartPreflightBlocksUnconfirmedGateWithoutNewRequestOrRoute() {
+        let previous = UUID()
+        let wouldBeNewRequest = UUID()
+        var gate = DirectPasteRequestGate()
+        XCTAssertTrue(gate.begin(requestId: previous))
+        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
+
+        XCTAssertEqual(
+            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: gate.state),
+            .blockedByPreviousUnconfirmedAndStop
+        )
+        XCTAssertEqual(gate.state, .unconfirmed(previous))
+        XCTAssertFalse(gate.begin(requestId: wouldBeNewRequest))
+    }
+
+    func testCompatibilitySessionStartPreflightAllowsExistingUnconfirmedGate() {
+        let previous = UUID()
+        var gate = DirectPasteRequestGate()
+        XCTAssertTrue(gate.begin(requestId: previous))
+        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
+
+        XCTAssertEqual(
+            DirectPasteSessionStartPolicy.decision(mode: .compatibility, gateState: gate.state),
+            .start
+        )
+        XCTAssertEqual(gate.state, .unconfirmed(previous))
+    }
+
+    func testDirectGateReturnsToIdleOnlyAfterMatchingAcknowledgement() {
+        let first = UUID()
+        let different = UUID()
+        var gate = DirectPasteRequestGate()
+
+        XCTAssertTrue(gate.begin(requestId: first))
+        XCTAssertFalse(gate.acknowledge(requestId: different))
+        XCTAssertEqual(gate.state, .inFlight(first))
+        XCTAssertTrue(gate.acknowledge(requestId: first))
+        XCTAssertEqual(gate.state, .idle)
     }
 
 }

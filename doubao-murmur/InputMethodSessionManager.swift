@@ -37,6 +37,8 @@ final class InputMethodSessionManager {
     private var stopSafetyWorkItem: DispatchWorkItem?
     private var clipboardPublishWorkItem: DispatchWorkItem?
     private var directPasteTask: Task<Void, Never>?
+    private var directPasteRequestGate = DirectPasteRequestGate()
+    private var directPasteInFlightText: String?
     private var pasteGeneration = UUID()
     private var previousFrontmostApp: NSRunningApplication?
     private var pasteTargetApp: NSRunningApplication?
@@ -99,6 +101,12 @@ final class InputMethodSessionManager {
     }
 
     private func startSession() {
+        // This preflight intentionally runs before any focus-affecting work.
+        // An ambiguous direct-paste alert activates this app; capturing the
+        // frontmost app after that would turn the alert/app into a wrong paste
+        // target and could bypass the direct-request safety gate.
+        guard preflightDirectPasteBeforeStartingSession() else { return }
+
         guard inputSourceManager.saveCurrentInputSource() else {
             showInputSourceError("无法保存当前输入法")
             return
@@ -249,14 +257,29 @@ final class InputMethodSessionManager {
             },
             uuCompatibility: { [weak self] in
                 self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
-                    if !isFrontmost {
-                        // Preserve the established UU compatibility behaviour:
-                        // its defensive clipboard algorithm still owns timing.
-                        print("[InputMethodSessionManager] ⚠️ UU target did not become frontmost before compatibility paste")
+                    guard let self else { return }
+                    guard PasteHelper.ClipboardDefensePolicy.initialTargetDecision(
+                        targetIsFrontmost: isFrontmost
+                    ) == .continueDefending else {
+                        print("[InputMethodSessionManager] ⚠️ UU target did not become frontmost; not pasting")
+                        self.handleCompatibilityPasteFailure(
+                            PasteHelper.CompatibilityPasteFailureResult(
+                                failure: .targetNotFrontmost,
+                                clipboardRetained: PasteHelper.copyOnly(text)
+                            )
+                        )
+                        return
                     }
-                    PasteHelper.copyAndPasteForUUCompatibility(text) { [weak self] in
-                        self?.presentCompatibilityPasteTimeout()
-                    }
+                    PasteHelper.copyAndPasteForUUCompatibility(
+                        text,
+                        isPasteTargetFrontmost: { [weak self] in
+                            guard let self, self.pasteGeneration == generation else { return false }
+                            return self.isPasteTargetFrontmost(target)
+                        },
+                        onFailure: { [weak self] result in
+                            self?.handleCompatibilityPasteFailure(result)
+                        }
+                    )
                 }
             },
             uuDirect: { [weak self] in
@@ -332,11 +355,34 @@ final class InputMethodSessionManager {
         overlayPanel.currentText().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Must be called before saving input-source state, invalidating ordinary
+    /// paste work, querying `frontmostApplication`, or showing the overlay.
+    private func preflightDirectPasteBeforeStartingSession() -> Bool {
+        let mode = PasteRoutingSettings().uuPasteMode
+        switch DirectPasteSessionStartPolicy.decision(
+            mode: mode,
+            gateState: directPasteRequestGate.state
+        ) {
+        case .start:
+            return true
+        case .markInFlightUnconfirmedAndStop:
+            directPasteTask?.cancel()
+            directPasteTask = nil
+            markInFlightDirectPasteUnconfirmed(reason: "new recording requested before direct acknowledgement")
+            return false
+        case .blockedByPreviousUnconfirmedAndStop:
+            print("[InputMethodSessionManager] ⚠️ Direct mode remains blocked by a previous unconfirmed request; recording did not start")
+            handleDirectPasteOutcome(.recordingBlockedByPreviousUnconfirmedRequest, text: "")
+            return false
+        }
+    }
+
     private func invalidatePendingPaste() {
+        directPasteTask?.cancel()
+        markInFlightDirectPasteUnconfirmed(reason: "session invalidated before direct acknowledgement")
         pasteGeneration = UUID()
         clipboardPublishWorkItem?.cancel()
         clipboardPublishWorkItem = nil
-        directPasteTask?.cancel()
         directPasteTask = nil
         PasteHelper.cancelPendingPaste()
     }
@@ -348,18 +394,29 @@ final class InputMethodSessionManager {
     }
 
     private func startDirectPaste(_ text: String, target: NSRunningApplication?, generation: UUID) {
-        directPasteTask?.cancel()
+        guard directPasteRequestGate.begin(requestId: generation) else {
+            print("[InputMethodSessionManager] ⚠️ Previous direct paste is unconfirmed; not sending a second request")
+            handleDirectPasteOutcome(.blockedByPreviousUnconfirmedRequest, text: text)
+            return
+        }
+        directPasteInFlightText = text
         directPasteTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.pasteGeneration == generation {
-                    self.directPasteTask = nil
-                }
+                self.directPasteTask = nil
             }
             do {
                 self.logPasteRoute(.uuDirect, target: target, event: "remote paste POST start requestId=\(generation.uuidString)")
                 let acknowledgement = try await RemoteClipboardClient().paste(text: text, requestId: generation)
-                guard !Task.isCancelled, self.pasteGeneration == generation else { return }
+                guard !Task.isCancelled, self.pasteGeneration == generation else {
+                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement became stale or cancelled")
+                    return
+                }
+                guard self.directPasteRequestGate.acknowledge(requestId: generation) else {
+                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement could not be matched")
+                    return
+                }
+                self.directPasteInFlightText = nil
                 self.logPasteRoute(
                     .uuDirect,
                     target: target,
@@ -368,21 +425,45 @@ final class InputMethodSessionManager {
                         "remoteTargetBundle=\(acknowledgement.targetBundleIdentifier ?? "<none>")"
                 )
             } catch is CancellationError {
-                // Once the helper accepts /paste it owns the one-shot remote
-                // event. The request ID prevents a transport retry from posting
-                // a second event in the same helper process.
+                self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct request cancelled")
             } catch {
-                guard !Task.isCancelled, self.pasteGeneration == generation else { return }
-                print("[InputMethodSessionManager] ⚠️ Remote paste request failed: \(error.localizedDescription)")
-                self.handleDirectPasteOutcome(.remoteWriteFailed, text: text)
+                if Task.isCancelled || self.pasteGeneration != generation {
+                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct request failed after cancellation or generation change")
+                } else {
+                    print("[InputMethodSessionManager] ⚠️ Remote paste request failed: \(error.localizedDescription)")
+                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement failed")
+                }
             }
         }
     }
 
-    private func presentCompatibilityPasteTimeout() {
+    private func markInFlightDirectPasteUnconfirmed(reason: String) {
+        guard case let .inFlight(requestId) = directPasteRequestGate.state,
+              let text = directPasteInFlightText else { return }
+        markDirectPasteUnconfirmed(requestId: requestId, text: text, reason: reason)
+    }
+
+    private func markDirectPasteUnconfirmed(requestId: UUID, text: String, reason: String) {
+        guard directPasteRequestGate.markUnconfirmed(requestId: requestId) else { return }
+        directPasteInFlightText = nil
+        print("[InputMethodSessionManager] ⚠️ Direct paste is unconfirmed (requestId=\(requestId.uuidString), reason=\(reason))")
+        handleDirectPasteOutcome(.unconfirmed, text: text)
+    }
+
+    private func handleCompatibilityPasteFailure(_ result: PasteHelper.CompatibilityPasteFailureResult) {
         let alert = NSAlert()
-        alert.messageText = "兼容模式剪贴板未稳定"
-        alert.informativeText = "文字已重新复制到本机剪贴板，本次未自动粘贴。请手动粘贴，或调大剪贴板稳定时间。"
+        switch result.failure {
+        case .deadlineExpired:
+            alert.messageText = "兼容模式剪贴板未稳定"
+            alert.informativeText = result.clipboardRetained
+                ? "文字已重新复制到本机剪贴板，本次未自动粘贴。请手动粘贴，或调大剪贴板稳定时间。"
+                : "本次未自动粘贴，且无法确认文字已重新复制到本机剪贴板。请检查剪贴板后手动粘贴。"
+        case .targetNotFrontmost:
+            alert.messageText = "兼容模式目标应用已切换"
+            alert.informativeText = result.clipboardRetained
+                ? "原目标应用未保持在前台，文字已重新复制到本机剪贴板，本次未自动粘贴。请回到目标输入框后手动粘贴。"
+                : "原目标应用未保持在前台，本次未自动粘贴，且无法确认文字已重新复制到本机剪贴板。请检查剪贴板后手动粘贴。"
+        }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "好的")
         NSApp.activate(ignoringOtherApps: true)
