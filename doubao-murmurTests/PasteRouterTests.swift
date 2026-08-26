@@ -110,8 +110,8 @@ final class PasteRouterTests: XCTestCase {
 
         XCTAssertEqual(copiedTexts, ["test transcription"])
         XCTAssertEqual(presentedPrompts, [.writeFailure])
-        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.title, "被控制端粘贴失败")
-        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.message, "请检查被控制端助手、辅助功能权限和 UU 端口映射，或切换到兼容模式。")
+        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.title, "被控制端粘贴未确认")
+        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.message, "本次粘贴可能未执行，也可能已执行但回执丢失。请先检查目标输入框，不要自动重试；可检查被控制端助手、辅助功能权限和 UU 端口映射，或切换到兼容模式。")
         XCTAssertFalse(DirectPasteFailureHandler.plan(for: .remoteWriteFailed).shouldPaste)
         XCTAssertEqual(settings.uuPasteMode, .direct)
     }
