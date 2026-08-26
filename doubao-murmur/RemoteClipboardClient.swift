@@ -3,14 +3,23 @@ import Foundation
 
 /// Typed client for the loopback-only `murmur-mirror` helper.
 struct RemoteClipboardClient {
-    static let protocolVersion = 1
+    static let protocolVersion = 2
 
     private let baseURL: URL
     private let session: URLSession
 
-    init(baseURL: URL = URL(string: "http://127.0.0.1:17771")!, session: URLSession = .shared) {
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        // Human-paced dictation can still have several outstanding ACKs. Keep
+        // transport concurrency above that range so one slow response does not
+        // merely move the global gate into URLSession's connection pool.
+        configuration.httpMaximumConnectionsPerHost = 32
+        return URLSession(configuration: configuration)
+    }()
+
+    init(baseURL: URL = URL(string: "http://127.0.0.1:17771")!, session: URLSession? = nil) {
         self.baseURL = baseURL
-        self.session = session
+        self.session = session ?? Self.defaultSession
     }
 
     func health() async throws {
@@ -48,11 +57,25 @@ struct RemoteClipboardClient {
     }
 
     @discardableResult
-    func paste(text: String, requestId: UUID) async throws -> RemotePasteAcknowledgement {
+    func paste(
+        text: String,
+        identity: PasteOrderIdentity,
+        onTransportEvent: (RemoteClipboardTransportEvent) -> Void = { _ in }
+    ) async throws -> RemotePasteAcknowledgement {
         guard !text.isEmpty else { throw RemoteClipboardClientError.emptyText }
 
-        let body = try JSONEncoder().encode(RemotePasteRequest(requestId: requestId, text: text))
+        let body = try JSONEncoder().encode(
+            RemotePasteRequest(
+                requestId: identity.requestId,
+                controllerSessionId: identity.controllerSessionId,
+                sequence: identity.sequence,
+                text: text
+            )
+        )
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         let (data, response) = try await send(method: "POST", path: "/paste", body: body)
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        onTransportEvent(.responseReceived(httpStatus: response.statusCode, durationMilliseconds: elapsed))
         guard response.statusCode == 200 else {
             throw RemoteClipboardClientError.unexpectedStatus(response.statusCode)
         }
@@ -64,8 +87,14 @@ struct RemoteClipboardClient {
         guard acknowledgement.protocolVersion == Self.protocolVersion else {
             throw RemoteClipboardClientError.unsupportedProtocol(acknowledgement.protocolVersion)
         }
-        guard acknowledgement.requestId == requestId else {
+        guard acknowledgement.requestId == identity.requestId else {
             throw RemoteClipboardClientError.requestMismatch
+        }
+        guard acknowledgement.controllerSessionId == identity.controllerSessionId else {
+            throw RemoteClipboardClientError.controllerSessionMismatch
+        }
+        guard acknowledgement.sequence == identity.sequence else {
+            throw RemoteClipboardClientError.sequenceMismatch
         }
         guard acknowledgement.sha256 == Self.sha256(of: text) else {
             throw RemoteClipboardClientError.hashMismatch
@@ -111,6 +140,8 @@ struct RemotePasteAcknowledgement: Decodable {
     let sha256: String
     let changeCount: Int
     let requestId: UUID
+    let controllerSessionId: UUID
+    let sequence: Int64
     let eventPosted: Bool
     let targetProcessIdentifier: Int32
     let targetBundleIdentifier: String?
@@ -127,6 +158,8 @@ private struct ClipboardRequest: Encodable {
 
 private struct RemotePasteRequest: Encodable {
     let requestId: UUID
+    let controllerSessionId: UUID
+    let sequence: Int64
     let text: String
 }
 
@@ -137,6 +170,8 @@ enum RemoteClipboardClientError: LocalizedError {
     case unsupportedProtocol(Int)
     case hashMismatch
     case requestMismatch
+    case controllerSessionMismatch
+    case sequenceMismatch
     case rejected
     case emptyText
 
@@ -148,6 +183,8 @@ enum RemoteClipboardClientError: LocalizedError {
         case let .unsupportedProtocol(version): return "Remote clipboard protocol \(version) is unsupported."
         case .hashMismatch: return "Remote clipboard acknowledgement did not match the submitted text."
         case .requestMismatch: return "Remote paste acknowledgement did not match the submitted request."
+        case .controllerSessionMismatch: return "Remote paste acknowledgement did not match the controller session."
+        case .sequenceMismatch: return "Remote paste acknowledgement did not match the order sequence."
         case .rejected: return "Remote clipboard rejected the request."
         case .emptyText: return "Remote clipboard text must not be empty."
         }

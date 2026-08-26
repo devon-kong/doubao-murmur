@@ -1,7 +1,78 @@
 import AppKit
-import Combine
 import CoreGraphics
 import Foundation
+
+struct RecordingReadinessGate {
+    enum Action: Equatable {
+        case none
+        case postFunctionKeyDown
+    }
+
+    private var focusIsReady = false
+    private var inputSourceIsReady = false
+    private var didAuthorizeFunctionKeyDown = false
+    private var isCancelled = false
+
+    mutating func markFocusReady() -> Action {
+        focusIsReady = true
+        return authorizationAction()
+    }
+
+    mutating func markInputSourceReady() -> Action {
+        inputSourceIsReady = true
+        return authorizationAction()
+    }
+
+    mutating func cancel() {
+        isCancelled = true
+    }
+
+    private mutating func authorizationAction() -> Action {
+        guard !isCancelled,
+              focusIsReady,
+              inputSourceIsReady,
+              !didAuthorizeFunctionKeyDown else { return .none }
+        didAuthorizeFunctionKeyDown = true
+        return .postFunctionKeyDown
+    }
+}
+
+struct MarkedTextCommitGate {
+    enum Action: Equatable {
+        case none
+        case markedTextStarted
+        case markedTextCommitted
+    }
+
+    static let automaticCompletionTimeout: TimeInterval? = nil
+
+    private var didObserveMarkedText = false
+    private var isStopping = false
+    private var didCommit = false
+    private var isCancelled = false
+
+    mutating func observe(hasMarkedText: Bool) -> Action {
+        guard !isCancelled else { return .none }
+        if hasMarkedText {
+            guard !didObserveMarkedText else { return .none }
+            didObserveMarkedText = true
+            return .markedTextStarted
+        }
+        guard isStopping, didObserveMarkedText, !didCommit else { return .none }
+        didCommit = true
+        return .markedTextCommitted
+    }
+
+    mutating func beginStopping(currentlyHasMarkedText: Bool) -> Action {
+        guard !isCancelled else { return .none }
+        isStopping = true
+        return observe(hasMarkedText: currentlyHasMarkedText)
+    }
+
+    mutating func cancel() {
+        isCancelled = true
+    }
+}
 
 /// Focus an NSTextView, select Doubao's input source, and hold
 /// the Fn key synthetically while a voice-input session is active.
@@ -14,10 +85,6 @@ final class InputMethodSessionManager {
         case stopping
     }
 
-    private static let inputSourceSettleDelay: TimeInterval = 0.15
-    private static let functionKeyStartDelay: TimeInterval = 0.10
-    private static let finalTextQuietPeriod: TimeInterval = 0.35
-    private static let stopSafetyTimeout: TimeInterval = 1.5
     /// Poll interval / budget for waiting until UU (or the previous app) is
     /// actually frontmost before publishing the clipboard.
     private static let frontmostPollInterval: TimeInterval = 0.05
@@ -26,41 +93,40 @@ final class InputMethodSessionManager {
     private let appState: AppState
     private let overlayPanel: OverlayPanel
     private let hotkeyManager: HotkeyManager
-    private let directPasteFailureHandler: DirectPasteFailureHandler
-    private let directPasteFailurePresenter: RemoteClipboardFailurePresenting
+    private let pasteOrderEventLogger: PasteOrderEventLogger
+    private let directPasteOrderCoordinator: DirectPasteOrderCoordinator
     private let inputSourceManager = InputSourceManager()
     private var phase: SessionPhase = .idle
     private var functionKeyIsDown = false
-    private var preparationWorkItem: DispatchWorkItem?
-    private var functionKeyWorkItem: DispatchWorkItem?
-    private var finalTextQuietWorkItem: DispatchWorkItem?
-    private var stopSafetyWorkItem: DispatchWorkItem?
+    private var recordingReadinessGate = RecordingReadinessGate()
+    private var markedTextCommitGate = MarkedTextCommitGate()
+    private var sessionGeneration = UUID()
+    private var finalTextLockIsScheduled = false
     private var clipboardPublishWorkItem: DispatchWorkItem?
-    private var directPasteTask: Task<Void, Never>?
-    private var directPasteRequestGate = DirectPasteRequestGate()
-    private var directPasteInFlightText: String?
+    private var currentDirectPasteIdentity: PasteOrderIdentity?
+    private var currentPasteRoute: PasteRoute?
     private var pasteGeneration = UUID()
     private var previousFrontmostApp: NSRunningApplication?
     private var pasteTargetApp: NSRunningApplication?
-    private var transcriptionTextObservation: AnyCancellable?
 
     init(appState: AppState, overlayPanel: OverlayPanel, hotkeyManager: HotkeyManager) {
         self.appState = appState
         self.overlayPanel = overlayPanel
         self.hotkeyManager = hotkeyManager
-        directPasteFailureHandler = DirectPasteFailureHandler()
-        directPasteFailurePresenter = RemoteClipboardFailurePresenter()
+        let eventLogger = PasteOrderEventLogger(
+            side: "controller",
+            databaseURL: PasteOrderEventLogger.defaultDatabaseURL(side: "controller")
+        )
+        pasteOrderEventLogger = eventLogger
+        directPasteOrderCoordinator = DirectPasteOrderCoordinator(
+            logger: eventLogger,
+            onUnconfirmedCountChanged: { [weak appState] count in
+                appState?.unconfirmedDirectPasteCount = count
+            }
+        )
     }
 
     func start() {
-        transcriptionTextObservation = appState.$transcriptionText
-            .dropFirst()
-            .sink { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.handleTranscriptionTextChanged()
-                }
-            }
-
         hotkeyManager.onHotkeyEvent = { [weak self] event in
             Task { @MainActor in
                 guard let self else { return }
@@ -77,6 +143,9 @@ final class InputMethodSessionManager {
                 self?.cancelSession()
             }
         }
+        overlayPanel.onMarkedTextStateChanged = { [weak self] hasMarkedText in
+            self?.handleMarkedTextStateChanged(hasMarkedText)
+        }
         hotkeyManager.setEscapeHandlingEnabled(false)
         hotkeyManager.start()
         print("[InputMethodSessionManager] ✅ IME bridge started")
@@ -84,8 +153,7 @@ final class InputMethodSessionManager {
 
     func stop() {
         cancelSession()
-        transcriptionTextObservation?.cancel()
-        transcriptionTextObservation = nil
+        directPasteOrderCoordinator.cancelAllForShutdown()
         hotkeyManager.stop()
     }
 
@@ -101,22 +169,28 @@ final class InputMethodSessionManager {
     }
 
     private func startSession() {
-        // This preflight intentionally runs before any focus-affecting work.
-        // An ambiguous direct-paste alert activates this app; capturing the
-        // frontmost app after that would turn the alert/app into a wrong paste
-        // target and could bypass the direct-request safety gate.
-        guard preflightDirectPasteBeforeStartingSession() else { return }
-
         guard inputSourceManager.saveCurrentInputSource() else {
             showInputSourceError("无法保存当前输入法")
             return
         }
 
         invalidatePendingPaste()
+        sessionGeneration = UUID()
+        let generation = sessionGeneration
+        recordingReadinessGate = RecordingReadinessGate()
+        markedTextCommitGate = MarkedTextCommitGate()
+        finalTextLockIsScheduled = false
         previousFrontmostApp = NSWorkspace.shared.frontmostApplication
         // Capture the destination at recording start. Do not infer it from a
         // window title or from whichever process is frontmost after dictation.
         pasteTargetApp = previousFrontmostApp
+        let route = PasteRouter().route(for: pasteTargetApp)
+        currentPasteRoute = route
+        if route == .uuDirect {
+            currentDirectPasteIdentity = directPasteOrderCoordinator.beginRecording()
+        } else {
+            currentDirectPasteIdentity = nil
+        }
 
         phase = .preparing
         appState.transcriptionText = ""
@@ -124,36 +198,49 @@ final class InputMethodSessionManager {
         appState.errorMessage = nil
         appState.recordingState = .starting
         hotkeyManager.setEscapeHandlingEnabled(true)
-        overlayPanel.showOverlay()
-
-        // Ensure the text client exists and owns focus before selecting the IME.
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.selectInputSourceAndStartVoice()
+        // Both readiness paths start immediately on the main actor. AppKit and
+        // Text Input Services stay on their required thread; neither path waits
+        // for a fixed delay or assumes the other has completed first.
+        overlayPanel.showOverlay { [weak self] focusIsReady in
+            guard let self,
+                  self.phase == .preparing,
+                  self.sessionGeneration == generation else { return }
+            guard focusIsReady else {
+                self.cancelPreparingSession(
+                    message: "无法聚焦临时输入框",
+                    reason: .focusReadinessFailed
+                )
+                return
+            }
+            self.recordDirectLifecycleEvent(.focusReady)
+            self.applyReadinessAction(self.recordingReadinessGate.markFocusReady())
         }
-        preparationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.inputSourceSettleDelay, execute: workItem)
-    }
 
-    private func selectInputSourceAndStartVoice() {
-        guard phase == .preparing else { return }
-        guard inputSourceManager.selectDoubaoInputSource() else {
-            showInputSourceError("未找到或未启用豆包输入法")
+        guard inputSourceManager.selectAndConfirmDoubaoInputSource() else {
+            cancelPreparingSession(
+                message: "未找到、未启用或无法确认豆包输入法",
+                reason: .inputSourceSelectionFailed
+            )
             return
         }
+        guard phase == .preparing, sessionGeneration == generation else { return }
+        recordDirectLifecycleEvent(.inputSourceReady)
+        applyReadinessAction(recordingReadinessGate.markInputSourceReady())
+    }
 
+    private func applyReadinessAction(_ action: RecordingReadinessGate.Action) {
+        guard action == .postFunctionKeyDown, phase == .preparing else { return }
+        guard setFunctionKeyPressed(true) else {
+            cancelPreparingSession(
+                message: "无法发出语音输入启动事件",
+                reason: .functionKeyPostFailed
+            )
+            return
+        }
+        recordDirectLifecycleEvent(.functionKeyDownPosted)
         phase = .recording
         appState.recordingState = .recording
-        overlayPanel.focusTextInput()
-
-        // Give the newly selected input source a moment to become the active text client,
-        // then simulate holding Fn to invoke Doubao's native voice input.
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.phase == .recording else { return }
-            self.setFunctionKeyPressed(true)
-        }
-        functionKeyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.functionKeyStartDelay, execute: workItem)
-        print("[InputMethodSessionManager] ✅ Focused local NSTextView and selected Doubao input source")
+        print("[InputMethodSessionManager] ✅ Text client and Doubao input source ready; Fn pressed")
     }
 
     private func stopSession() {
@@ -166,65 +253,80 @@ final class InputMethodSessionManager {
         guard phase == .recording else { return }
         phase = .stopping
         appState.recordingState = .stopping
-        preparationWorkItem?.cancel()
-        preparationWorkItem = nil
-        functionKeyWorkItem?.cancel()
-        functionKeyWorkItem = nil
-        setFunctionKeyPressed(false)
-
-        scheduleStopSafetyTimeout()
-        if !trimmedTranscriptionText.isEmpty {
-            scheduleFinalCompletion()
+        if setFunctionKeyPressed(false) {
+            recordDirectLifecycleEvent(.functionKeyUpPosted)
+        } else {
+            print("[InputMethodSessionManager] ⚠️ Failed to post Fn-up")
         }
-        print("[InputMethodSessionManager] ⏹ Fn released; waiting for Doubao input text to settle")
+        overlayPanel.maintainTextInputFocus()
+        handleMarkedTextAction(
+            markedTextCommitGate.beginStopping(
+                currentlyHasMarkedText: overlayPanel.hasMarkedText
+            )
+        )
+        print("[InputMethodSessionManager] ⏹ Fn released; waiting for marked text commit")
     }
 
-    private func handleTranscriptionTextChanged() {
-        guard phase == .stopping else { return }
-        guard !trimmedTranscriptionText.isEmpty else {
-            finalTextQuietWorkItem?.cancel()
-            finalTextQuietWorkItem = nil
+    private func handleMarkedTextStateChanged(_ hasMarkedText: Bool) {
+        guard phase == .preparing || phase == .recording || phase == .stopping else { return }
+        handleMarkedTextAction(markedTextCommitGate.observe(hasMarkedText: hasMarkedText))
+    }
+
+    private func handleMarkedTextAction(_ action: MarkedTextCommitGate.Action) {
+        switch action {
+        case .none:
             return
+        case .markedTextStarted:
+            recordDirectLifecycleEvent(.markedTextStarted)
+        case .markedTextCommitted:
+            recordDirectLifecycleEvent(.markedTextCommitted)
+            scheduleFinalTextLockOnNextMainLoop()
         }
-        scheduleFinalCompletion()
     }
 
-    /// The input method can rewrite partial text after Fn is released.  Only paste
-    /// after it has remained unchanged for a short quiet period.
-    private func scheduleFinalCompletion() {
-        finalTextQuietWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.phase == .stopping else { return }
-            print("[InputMethodSessionManager] Text settled; completing session")
-            self.completeSession()
+    private func scheduleFinalTextLockOnNextMainLoop() {
+        guard !finalTextLockIsScheduled else { return }
+        finalTextLockIsScheduled = true
+        let generation = sessionGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.phase == .stopping,
+                  self.sessionGeneration == generation else { return }
+            let frozenText = self.overlayPanel.currentText()
+            self.recordDirectLifecycleEvent(.finalTextLocked, textLength: frozenText.count)
+            self.completeSession(withFrozenText: frozenText)
         }
-        finalTextQuietWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.finalTextQuietPeriod, execute: workItem)
     }
 
-    private func scheduleStopSafetyTimeout() {
-        stopSafetyWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.phase == .stopping else { return }
-            print("[InputMethodSessionManager] ⏱ Stop safety timeout; completing with current text")
-            self.completeSession()
-        }
-        stopSafetyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.stopSafetyTimeout, execute: workItem)
-    }
-
-    private func completeSession() {
+    private func completeSession(withFrozenText frozenText: String) {
         guard phase == .stopping else { return }
-        let text = trimmedTranscriptionText
+        let text = frozenText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
+            if let identity = currentDirectPasteIdentity {
+                directPasteOrderCoordinator.abandonRecording(
+                    identity: identity,
+                    reason: .emptyTranscription
+                )
+            }
             closeSession()
             print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")
             return
         }
 
         let target = pasteTargetApp
-        let route = PasteRouter().route(for: target)
+        // Freeze routing at recording start. A menu change applies to the next
+        // recording and cannot create a late order without recording metadata.
+        let route = currentPasteRoute ?? PasteRouter().route(for: target)
         let generation = pasteGeneration
+        let directIdentity = currentDirectPasteIdentity
+        if route == .uuDirect, let directIdentity {
+            directPasteOrderCoordinator.transcriptionReady(identity: directIdentity, textLength: text.count)
+        } else if let directIdentity {
+            directPasteOrderCoordinator.abandonRecording(
+                identity: directIdentity,
+                reason: .routeUnavailableBeforeSubmit
+            )
+        }
         logPasteRoute(route, target: target, event: "session completion")
         if PasteRouter.shouldPrepublishLocalClipboard(for: route) {
             // Compatibility mode starts UU's normal clipboard sync before the
@@ -232,7 +334,13 @@ final class InputMethodSessionManager {
             PasteHelper.copyOnly(text)
         }
         closeSession()
-        schedulePaste(text, route: route, target: target, generation: generation)
+        schedulePaste(
+            text,
+            route: route,
+            target: target,
+            generation: generation,
+            directIdentity: directIdentity
+        )
         print("[InputMethodSessionManager] ✅ Session completed (text length: \(text.count))")
     }
 
@@ -240,7 +348,8 @@ final class InputMethodSessionManager {
         _ text: String,
         route: PasteRoute,
         target: NSRunningApplication?,
-        generation: UUID
+        generation: UUID,
+        directIdentity: PasteOrderIdentity?
     ) {
         clipboardPublishWorkItem?.cancel()
         PasteHelper.cancelPendingPaste()
@@ -283,8 +392,13 @@ final class InputMethodSessionManager {
                 }
             },
             uuDirect: { [weak self] in
-                guard let self, self.pasteGeneration == generation else { return }
-                self.startDirectPaste(text, target: target, generation: generation)
+                guard let self, let identity = directIdentity else { return }
+                self.directPasteOrderCoordinator.submit(
+                    identity: identity,
+                    text: text,
+                    targetProcessIdentifier: target?.processIdentifier,
+                    targetBundleIdentifier: target?.bundleIdentifier
+                )
             }
         )
     }
@@ -317,27 +431,32 @@ final class InputMethodSessionManager {
     private func cancelSession() {
         invalidatePendingPaste()
         guard phase != .idle else { return }
+        if let identity = currentDirectPasteIdentity {
+            directPasteOrderCoordinator.abandonRecording(
+                identity: identity,
+                reason: .sessionCancelled
+            )
+        }
         closeSession()
         print("[InputMethodSessionManager] Session cancelled and previous input source restored")
     }
 
     private func closeSession() {
-        preparationWorkItem?.cancel()
-        preparationWorkItem = nil
-        functionKeyWorkItem?.cancel()
-        functionKeyWorkItem = nil
-        finalTextQuietWorkItem?.cancel()
-        finalTextQuietWorkItem = nil
-        stopSafetyWorkItem?.cancel()
-        stopSafetyWorkItem = nil
-        setFunctionKeyPressed(false)
+        recordingReadinessGate.cancel()
+        markedTextCommitGate.cancel()
+        sessionGeneration = UUID()
+        finalTextLockIsScheduled = false
+        overlayPanel.cancelTextInputFocusRequest()
+        _ = setFunctionKeyPressed(false)
         phase = .idle
         hotkeyManager.setEscapeHandlingEnabled(false)
-        overlayPanel.clearText()
         overlayPanel.hideOverlay()
         inputSourceManager.restorePreviousInputSource()
+        overlayPanel.clearText()
         activatePreviousFrontmostApp()
         appState.reset()
+        currentDirectPasteIdentity = nil
+        currentPasteRoute = nil
     }
 
     private func activatePreviousFrontmostApp() {
@@ -351,39 +470,10 @@ final class InputMethodSessionManager {
         }
     }
 
-    private var trimmedTranscriptionText: String {
-        overlayPanel.currentText().trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Must be called before saving input-source state, invalidating ordinary
-    /// paste work, querying `frontmostApplication`, or showing the overlay.
-    private func preflightDirectPasteBeforeStartingSession() -> Bool {
-        let mode = PasteRoutingSettings().uuPasteMode
-        switch DirectPasteSessionStartPolicy.decision(
-            mode: mode,
-            gateState: directPasteRequestGate.state
-        ) {
-        case .start:
-            return true
-        case .markInFlightUnconfirmedAndStop:
-            directPasteTask?.cancel()
-            directPasteTask = nil
-            markInFlightDirectPasteUnconfirmed(reason: "new recording requested before direct acknowledgement")
-            return false
-        case .blockedByPreviousUnconfirmedAndStop:
-            print("[InputMethodSessionManager] ⚠️ Direct mode remains blocked by a previous unconfirmed request; recording did not start")
-            handleDirectPasteOutcome(.recordingBlockedByPreviousUnconfirmedRequest, text: "")
-            return false
-        }
-    }
-
     private func invalidatePendingPaste() {
-        directPasteTask?.cancel()
-        markInFlightDirectPasteUnconfirmed(reason: "session invalidated before direct acknowledgement")
         pasteGeneration = UUID()
         clipboardPublishWorkItem?.cancel()
         clipboardPublishWorkItem = nil
-        directPasteTask = nil
         PasteHelper.cancelPendingPaste()
     }
 
@@ -391,63 +481,6 @@ final class InputMethodSessionManager {
         guard let target else { return true }
         guard !target.isTerminated else { return false }
         return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier
-    }
-
-    private func startDirectPaste(_ text: String, target: NSRunningApplication?, generation: UUID) {
-        guard directPasteRequestGate.begin(requestId: generation) else {
-            print("[InputMethodSessionManager] ⚠️ Previous direct paste is unconfirmed; not sending a second request")
-            handleDirectPasteOutcome(.blockedByPreviousUnconfirmedRequest, text: text)
-            return
-        }
-        directPasteInFlightText = text
-        directPasteTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                self.directPasteTask = nil
-            }
-            do {
-                self.logPasteRoute(.uuDirect, target: target, event: "remote paste POST start requestId=\(generation.uuidString)")
-                let acknowledgement = try await RemoteClipboardClient().paste(text: text, requestId: generation)
-                guard !Task.isCancelled, self.pasteGeneration == generation else {
-                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement became stale or cancelled")
-                    return
-                }
-                guard self.directPasteRequestGate.acknowledge(requestId: generation) else {
-                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement could not be matched")
-                    return
-                }
-                self.directPasteInFlightText = nil
-                self.logPasteRoute(
-                    .uuDirect,
-                    target: target,
-                    event: "remote paste ACK success eventPosted=\(acknowledgement.eventPosted) " +
-                        "remoteTargetPID=\(acknowledgement.targetProcessIdentifier) " +
-                        "remoteTargetBundle=\(acknowledgement.targetBundleIdentifier ?? "<none>")"
-                )
-            } catch is CancellationError {
-                self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct request cancelled")
-            } catch {
-                if Task.isCancelled || self.pasteGeneration != generation {
-                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct request failed after cancellation or generation change")
-                } else {
-                    print("[InputMethodSessionManager] ⚠️ Remote paste request failed: \(error.localizedDescription)")
-                    self.markDirectPasteUnconfirmed(requestId: generation, text: text, reason: "direct acknowledgement failed")
-                }
-            }
-        }
-    }
-
-    private func markInFlightDirectPasteUnconfirmed(reason: String) {
-        guard case let .inFlight(requestId) = directPasteRequestGate.state,
-              let text = directPasteInFlightText else { return }
-        markDirectPasteUnconfirmed(requestId: requestId, text: text, reason: reason)
-    }
-
-    private func markDirectPasteUnconfirmed(requestId: UUID, text: String, reason: String) {
-        guard directPasteRequestGate.markUnconfirmed(requestId: requestId) else { return }
-        directPasteInFlightText = nil
-        print("[InputMethodSessionManager] ⚠️ Direct paste is unconfirmed (requestId=\(requestId.uuidString), reason=\(reason))")
-        handleDirectPasteOutcome(.unconfirmed, text: text)
     }
 
     private func handleCompatibilityPasteFailure(_ result: PasteHelper.CompatibilityPasteFailureResult) {
@@ -470,32 +503,54 @@ final class InputMethodSessionManager {
         alert.runModal()
     }
 
-    private func handleDirectPasteOutcome(_ outcome: DirectPasteOutcome, text: String) {
-        directPasteFailureHandler.handle(
-            outcome: outcome,
-            text: text,
-            copyTextLocally: { PasteHelper.copyOnly($0) },
-            present: { [weak self] prompt, onSwitchToCompatibility in
-                self?.directPasteFailurePresenter.present(prompt, onSwitchToCompatibility: onSwitchToCompatibility)
-            }
-        )
-    }
-
     private func logPasteRoute(_ route: PasteRoute, target: NSRunningApplication?, event: String) {
         let bundleIdentifier = target?.bundleIdentifier ?? "<none>"
         let processIdentifier = target.map(\.processIdentifier) ?? -1
         print("[InputMethodSessionManager] route=\(route) targetBundle=\(bundleIdentifier) targetPID=\(processIdentifier) event=\(event)")
     }
 
-    private func setFunctionKeyPressed(_ isPressed: Bool) {
-        guard functionKeyIsDown != isPressed else { return }
-        if !FunctionKeyInjector.post(isPressed) {
+    @discardableResult
+    private func setFunctionKeyPressed(_ isPressed: Bool) -> Bool {
+        guard functionKeyIsDown != isPressed else { return true }
+        guard FunctionKeyInjector.post(isPressed) else {
             print("[InputMethodSessionManager] ⚠️ Failed to post synthetic Fn event")
+            return false
         }
         functionKeyIsDown = isPressed
+        return true
+    }
+
+    private func recordDirectLifecycleEvent(
+        _ event: DirectPasteLifecycleEvent,
+        textLength: Int? = nil
+    ) {
+        guard let identity = currentDirectPasteIdentity else { return }
+        directPasteOrderCoordinator.recordLifecycleEvent(
+            identity: identity,
+            event: event,
+            textLength: textLength
+        )
+    }
+
+    private func cancelPreparingSession(
+        message: String,
+        reason: DirectPasteCancellationReason
+    ) {
+        guard phase == .preparing else { return }
+        if let identity = currentDirectPasteIdentity {
+            directPasteOrderCoordinator.abandonRecording(identity: identity, reason: reason)
+        }
+        closeSession()
+        print("[InputMethodSessionManager] ❌ \(message)")
     }
 
     private func showInputSourceError(_ message: String) {
+        if let identity = currentDirectPasteIdentity {
+            directPasteOrderCoordinator.abandonRecording(
+                identity: identity,
+                reason: .inputSourceSelectionFailed
+            )
+        }
         if phase != .idle {
             closeSession()
         }

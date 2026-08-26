@@ -23,6 +23,7 @@ class AppState: ObservableObject {
     @Published var transcriptionText: String = ""
     @Published var showOverlay: Bool = false
     @Published var errorMessage: String?
+    @Published var unconfirmedDirectPasteCount: Int = 0
 
     var isRecording: Bool {
         recordingState == .recording || recordingState == .starting

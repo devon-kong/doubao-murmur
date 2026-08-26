@@ -5,24 +5,19 @@ import XCTest
 final class PasteRouterTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
-
     override func setUp() {
         super.setUp()
         suiteName = "com.doubao.murmur.tests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
     }
-
     override func tearDown() {
         defaults.removePersistentDomain(forName: suiteName)
-        defaults = nil
-        suiteName = nil
         super.tearDown()
     }
-
     func testExactUUBundleUsesCompatibilityByDefault() {
         let router = PasteRouter(settings: PasteRoutingSettings(defaults: defaults))
 
-        XCTAssertEqual(router.route(bundleIdentifier: "com.netease.uuremote"), .uuCompatibility)
+        XCTAssertEqual(router.route(bundleIdentifier: PasteRouter.uuBundleIdentifier), .uuCompatibility)
     }
 
     func testOtherBundleIdentifiersAlwaysUseLocalRoute() {
@@ -33,36 +28,25 @@ final class PasteRouterTests: XCTestCase {
         XCTAssertEqual(router.route(bundleIdentifier: nil), .local)
     }
 
-    func testDirectModePersistsWithoutChangingQuietPeriod() {
-        defaults.set(0.5, forKey: PasteHelper.quietPeriodDefaultsKey)
-        let settings = PasteRoutingSettings(defaults: defaults)
-        XCTAssertEqual(settings.uuPasteMode, .compatibility)
-
-        settings.uuPasteMode = .direct
-        XCTAssertEqual(PasteRoutingSettings(defaults: defaults).uuPasteMode, .direct)
-        XCTAssertEqual(defaults.double(forKey: PasteHelper.quietPeriodDefaultsKey), 0.5, accuracy: 0.0001)
-    }
-
-    func testRouteDispatchInvokesOnlyItsSelectedStrategy() {
-        for route in [PasteRoute.local, .uuCompatibility, .uuDirect] {
-            var calls: [PasteRoute] = []
-            PasteRouter.execute(
-                route,
-                local: { calls.append(.local) },
-                uuCompatibility: { calls.append(.uuCompatibility) },
-                uuDirect: { calls.append(.uuDirect) }
-            )
-            XCTAssertEqual(calls, [route])
-        }
-    }
-
     func testOnlyCompatibilityRoutePrepublishesControllerClipboard() {
         XCTAssertFalse(PasteRouter.shouldPrepublishLocalClipboard(for: .local))
         XCTAssertTrue(PasteRouter.shouldPrepublishLocalClipboard(for: .uuCompatibility))
         XCTAssertFalse(PasteRouter.shouldPrepublishLocalClipboard(for: .uuDirect))
-        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .remoteWriteFailed).shouldPaste)
     }
-
+    func testDirectModePersistsWithoutChangingCompatibilityDelay() {
+        defaults.set(0.5, forKey: PasteHelper.quietPeriodDefaultsKey)
+        let settings = PasteRoutingSettings(defaults: defaults)
+        settings.uuPasteMode = .direct
+        XCTAssertEqual(PasteRoutingSettings(defaults: defaults).uuPasteMode, .direct)
+        XCTAssertEqual(defaults.double(forKey: PasteHelper.quietPeriodDefaultsKey), 0.5, accuracy: 0.0001)
+    }
+    func testRouteDispatchInvokesOnlySelectedStrategy() {
+        for route in [PasteRoute.local, .uuCompatibility, .uuDirect] {
+            var calls: [PasteRoute] = []
+            PasteRouter.execute(route, local: { calls.append(.local) }, uuCompatibility: { calls.append(.uuCompatibility) }, uuDirect: { calls.append(.uuDirect) })
+            XCTAssertEqual(calls, [route])
+        }
+    }
     func testCompatibilityMaximumWaitAllowsTwoStableWindowsWithTwoSecondFloor() {
         XCTAssertEqual(PasteHelper.ClipboardDefensePolicy.maximumWait(for: 0.25), 2.0, accuracy: 0.0001)
         XCTAssertEqual(PasteHelper.ClipboardDefensePolicy.maximumWait(for: 1.0), 2.0, accuracy: 0.0001)
@@ -168,210 +152,263 @@ final class PasteRouterTests: XCTestCase {
             .resetStableWindow
         )
     }
+}
 
-    func testDirectWriteFailureCopiesTextPresentsExactPromptAndNeverPastesOrDowngrades() {
-        let settings = PasteRoutingSettings(defaults: defaults)
-        settings.uuPasteMode = .direct
-        let handler = DirectPasteFailureHandler(settings: settings)
-        var copiedTexts: [String] = []
-        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
+final class RecordingReadinessGateTests: XCTestCase {
+    func testBothReadinessCompletionOrdersAuthorizeExactlyOneFunctionKeyDown() {
+        var focusFirst = RecordingReadinessGate()
+        let focusFirstActions = [
+            focusFirst.markFocusReady(),
+            focusFirst.markInputSourceReady(),
+            focusFirst.markFocusReady(),
+            focusFirst.markInputSourceReady()
+        ]
+        XCTAssertEqual(focusFirstActions.filter { $0 == .postFunctionKeyDown }.count, 1)
 
-        handler.handle(
-            outcome: .remoteWriteFailed,
-            text: "test transcription",
-            copyTextLocally: { copiedTexts.append($0) },
-            present: { prompt, _ in presentedPrompts.append(prompt) }
-        )
-
-        XCTAssertEqual(copiedTexts, ["test transcription"])
-        XCTAssertEqual(presentedPrompts, [.writeFailure])
-        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.title, "被控制端粘贴未确认")
-        XCTAssertEqual(RemoteClipboardFailurePrompt.writeFailure.message, "本次粘贴可能未执行，也可能已执行但回执丢失。请先检查目标输入框，不要自动重试；可检查被控制端助手、辅助功能权限和 UU 端口映射，或切换到兼容模式。")
-        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .remoteWriteFailed).shouldPaste)
-        XCTAssertEqual(settings.uuPasteMode, .direct)
+        var inputSourceFirst = RecordingReadinessGate()
+        let inputSourceFirstActions = [
+            inputSourceFirst.markInputSourceReady(),
+            inputSourceFirst.markFocusReady(),
+            inputSourceFirst.markInputSourceReady(),
+            inputSourceFirst.markFocusReady()
+        ]
+        XCTAssertEqual(inputSourceFirstActions.filter { $0 == .postFunctionKeyDown }.count, 1)
     }
 
-    func testSelectingCompatibilityOnlyChangesFutureModeInIsolatedDefaults() {
-        defaults.set(0.5, forKey: PasteHelper.quietPeriodDefaultsKey)
-        let settings = PasteRoutingSettings(defaults: defaults)
-        settings.uuPasteMode = .direct
-        let handler = DirectPasteFailureHandler(settings: settings)
-        var switchToCompatibility: (() -> Void)?
+    func testCancellationRejectsLateReadinessCallbacks() {
+        var gate = RecordingReadinessGate()
+        XCTAssertEqual(gate.markFocusReady(), .none)
+        gate.cancel()
+        XCTAssertEqual(gate.markInputSourceReady(), .none)
+        XCTAssertEqual(gate.markFocusReady(), .none)
+    }
+}
 
-        handler.handle(
-            outcome: .remoteWriteFailed,
-            text: "test transcription",
-            copyTextLocally: { _ in },
-            present: { _, action in switchToCompatibility = action }
-        )
-        XCTAssertEqual(settings.uuPasteMode, .direct)
-
-        switchToCompatibility?()
-        XCTAssertEqual(settings.uuPasteMode, .compatibility)
-        XCTAssertEqual(defaults.double(forKey: PasteHelper.quietPeriodDefaultsKey), 0.5, accuracy: 0.0001)
+final class MarkedTextCommitGateTests: XCTestCase {
+    func testMarkedTextMustTransitionFromTrueToFalseWhileStoppingBeforeCompletion() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: false), .none)
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .none)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .markedTextCommitted)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
     }
 
-    func testUnconfirmedDirectOutcomeCopiesTextAndPresentsAmbiguousPrompt() {
-        var copiedTexts: [String] = []
-        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
-        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+    func testFalseBeforeCommitDoesNotAuthorizeFreezeOrHide() {
+        var gate = MarkedTextCommitGate()
+        var freezeCount = 0
+        var hideCount = 0
+        for action in [
+            gate.observe(hasMarkedText: false),
+            gate.beginStopping(currentlyHasMarkedText: false),
+            gate.observe(hasMarkedText: false)
+        ] where action == .markedTextCommitted {
+            freezeCount += 1
+            hideCount += 1
+        }
+        XCTAssertEqual(freezeCount, 0)
+        XCTAssertEqual(hideCount, 0)
+    }
 
-        handler.handle(
-            outcome: .unconfirmed,
-            text: "test transcription",
-            copyTextLocally: { copiedTexts.append($0) },
-            present: { prompt, _ in presentedPrompts.append(prompt) }
-        )
+    func testSameStringStillCompletesWhenOnlyMarkedStateDisappears() {
+        let textBeforeCommit = "字符串未变化"
+        let textAfterCommit = "字符串未变化"
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: true), .none)
+        XCTAssertEqual(textAfterCommit, textBeforeCommit)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .markedTextCommitted)
+    }
 
-        XCTAssertEqual(copiedTexts, ["test transcription"])
-        XCTAssertEqual(presentedPrompts, [.writeFailure])
+    func testCommitAlreadyObservedBeforeFnUpCompletesAtStoppingQuery() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
         XCTAssertEqual(
-            DirectPasteFailureHandler.plan(for: .unconfirmed),
-            DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: true, shouldPaste: false)
+            gate.beginStopping(currentlyHasMarkedText: false),
+            .markedTextCommitted
         )
     }
 
-    func testBlockedDirectRequestCopiesNewTextButNeverClaimsItMayHaveExecuted() {
-        var copiedTexts: [String] = []
-        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
-        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
+    func testProgrammaticCleanupCannotCreateCommit() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: true), .none)
+        gate.cancel()
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
 
-        handler.handle(
-            outcome: .blockedByPreviousUnconfirmedRequest,
-            text: "new transcription",
-            copyTextLocally: { copiedTexts.append($0) },
-            present: { prompt, _ in presentedPrompts.append(prompt) }
+        let textView = IMETrackingTextView(frame: .zero)
+        var markedStateCallbacks: [Bool] = []
+        textView.onMarkedTextStateChanged = { markedStateCallbacks.append($0) }
+        textView.string = "cleanup"
+        textView.clearProgrammatically()
+        XCTAssertTrue(markedStateCallbacks.isEmpty)
+    }
+
+    func testNeverMarkedSessionHasNoQuietPeriodOrAutomaticMaximumTimeout() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertNil(MarkedTextCommitGate.automaticCompletionTimeout)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: false), .none)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
+    }
+}
+
+@MainActor
+final class DirectPasteOrderCoordinatorTests: XCTestCase {
+    func testDelayedFirstAcknowledgementDoesNotBlockSecondAndReverseACKsMatchOrders() async throws {
+        let sender = ControllableOrderSender()
+        let coordinator = makeCoordinator(sender: sender)
+        let first = submit("001", to: coordinator)
+        let second = submit("002", to: coordinator)
+        XCTAssertEqual(first.controllerSessionId, second.controllerSessionId)
+        XCTAssertEqual(first.sequence + 1, second.sequence)
+        try await sender.waitForRequestCount(2)
+        XCTAssertEqual(coordinator.activeRequestCount, 2)
+        await sender.succeed(second)
+        try await waitUntil { coordinator.state(for: second.requestId) == .acknowledgedEventPosted }
+        XCTAssertEqual(coordinator.state(for: first.requestId), .sending)
+        await sender.succeed(first)
+        try await waitUntil { coordinator.state(for: first.requestId) == .acknowledgedEventPosted }
+        let firstSendCount = await sender.sendCount(for: first.requestId)
+        let secondSendCount = await sender.sendCount(for: second.requestId)
+        XCTAssertEqual(firstSendCount, 1)
+        XCTAssertEqual(secondSendCount, 1)
+    }
+    func testOneTimeoutDoesNotPolluteLaterAcknowledgedOrder() async throws {
+        let sender = ControllableOrderSender()
+        var unknownCounts: [Int] = []
+        let coordinator = makeCoordinator(sender: sender, countChanged: { unknownCounts.append($0) })
+        let first = submit("001", to: coordinator)
+        let second = submit("002", to: coordinator)
+        try await sender.waitForRequestCount(2)
+        await sender.fail(first, error: URLError(.timedOut))
+        await sender.succeed(second)
+        try await waitUntil { coordinator.state(for: first.requestId) == .unconfirmed }
+        try await waitUntil { coordinator.state(for: second.requestId) == .acknowledgedEventPosted }
+        XCTAssertEqual(coordinator.unconfirmedRequestCount, 1)
+        XCTAssertTrue(unknownCounts.contains(1))
+    }
+    func testNewRecordingAndCancellationDoNotCancelSentOrder() async throws {
+        let sender = ControllableOrderSender()
+        let coordinator = makeCoordinator(sender: sender)
+        let sent = submit("sent", to: coordinator)
+        try await sender.waitForRequestCount(1)
+        let cancelledRecording = coordinator.beginRecording()
+        coordinator.abandonRecording(identity: cancelledRecording, reason: .sessionCancelled)
+        XCTAssertEqual(coordinator.state(for: sent.requestId), .sending)
+        XCTAssertEqual(coordinator.activeRequestCount, 1)
+        await sender.succeed(sent)
+        try await waitUntil { coordinator.state(for: sent.requestId) == .acknowledgedEventPosted }
+    }
+
+    func testAbandonedRecordingsLogOneCancelledTerminalWithSafeReason() throws {
+        let logger = PasteOrderEventLogger(
+            side: "controller-test",
+            databaseURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("paste-orders-\(UUID().uuidString).sqlite3")
         )
-
-        XCTAssertEqual(copiedTexts, ["new transcription"])
-        XCTAssertEqual(presentedPrompts, [.requestBlocked])
-        XCTAssertNotEqual(RemoteClipboardFailurePrompt.requestBlocked, .writeFailure)
-        XCTAssertTrue(RemoteClipboardFailurePrompt.requestBlocked.title.contains("未发送"))
-        XCTAssertTrue(RemoteClipboardFailurePrompt.requestBlocked.message.contains("本轮没有发送粘贴请求"))
-        XCTAssertFalse(RemoteClipboardFailurePrompt.requestBlocked.message.contains("本次粘贴可能"))
-    }
-
-    func testBlockedDirectRecordingDoesNotCopyNonexistentNewText() {
-        var copiedTexts: [String] = []
-        var presentedPrompts: [RemoteClipboardFailurePrompt] = []
-        let handler = DirectPasteFailureHandler(settings: PasteRoutingSettings(defaults: defaults))
-
-        handler.handle(
-            outcome: .recordingBlockedByPreviousUnconfirmedRequest,
-            text: "text that was never recorded",
-            copyTextLocally: { copiedTexts.append($0) },
-            present: { prompt, _ in presentedPrompts.append(prompt) }
+        let coordinator = DirectPasteOrderCoordinator(
+            logger: logger,
+            sendOperation: { _, _, _ in
+                XCTFail("An abandoned recording must not send")
+                throw TestWaitError.timeout
+            }
         )
+        let reasons: [DirectPasteCancellationReason] = [
+            .emptyTranscription,
+            .sessionCancelled,
+            .inputSourceSelectionFailed,
+            .routeUnavailableBeforeSubmit,
+            .focusReadinessFailed,
+            .functionKeyPostFailed
+        ]
 
-        XCTAssertTrue(copiedTexts.isEmpty)
-        XCTAssertEqual(presentedPrompts, [.recordingBlocked])
-        XCTAssertTrue(RemoteClipboardFailurePrompt.recordingBlocked.message.contains("录音尚未开始"))
-        XCTAssertTrue(RemoteClipboardFailurePrompt.recordingBlocked.message.contains("没有发送新的粘贴请求"))
-        XCTAssertFalse(DirectPasteFailureHandler.plan(for: .recordingBlockedByPreviousUnconfirmedRequest).shouldCopyLocally)
+        for reason in reasons {
+            let identity = coordinator.beginRecording()
+            coordinator.abandonRecording(identity: identity, reason: reason)
+            coordinator.abandonRecording(identity: identity, reason: .sessionCancelled)
+            XCTAssertEqual(coordinator.state(for: identity.requestId), .cancelled)
+        }
+
+        logger.flush()
+        let rows = logger.storedEventSummaries()
+        XCTAssertEqual(rows.map(\.event), reasons.flatMap { _ in ["recording_started", "task_cancelled"] })
+        let loggedReasons = try rows
+            .filter { $0.event == "task_cancelled" }
+            .map { row -> String in
+                let details = try XCTUnwrap(row.detailsJSON)
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(details.utf8)) as? [String: String])
+                return try XCTUnwrap(object["reason"])
+            }
+        XCTAssertEqual(loggedReasons, reasons.map(\.rawValue))
     }
-
-    func testDirectGateRefusesSecondRequestWhileFirstIsInFlight() {
-        let first = UUID()
-        let second = UUID()
-        var gate = DirectPasteRequestGate()
-
-        XCTAssertTrue(gate.begin(requestId: first))
-        XCTAssertFalse(gate.begin(requestId: second))
-        XCTAssertEqual(gate.state, .inFlight(first))
-    }
-
-    func testDirectGateKeepsNewRequestsBlockedAfterCancellationOrStaleAcknowledgement() {
-        let first = UUID()
-        let second = UUID()
-        var gate = DirectPasteRequestGate()
-
-        XCTAssertTrue(gate.begin(requestId: first))
-        XCTAssertTrue(gate.markUnconfirmed(requestId: first))
-        XCTAssertEqual(gate.state, .unconfirmed(first))
-        XCTAssertFalse(gate.begin(requestId: second))
-        XCTAssertEqual(gate.state, .unconfirmed(first), "A blocked second request must not replace the old requestId")
-        XCTAssertFalse(gate.acknowledge(requestId: first))
-    }
-
-    func testSwitchingToCompatibilityDoesNotResetUnconfirmedDirectGate() {
-        let first = UUID()
-        let second = UUID()
-        let settings = PasteRoutingSettings(defaults: defaults)
-        settings.uuPasteMode = .direct
-        let handler = DirectPasteFailureHandler(settings: settings)
-        var gate = DirectPasteRequestGate()
-
-        XCTAssertTrue(gate.begin(requestId: first))
-        XCTAssertTrue(gate.markUnconfirmed(requestId: first))
-        handler.switchToCompatibilityForFutureSessions()
-
-        XCTAssertEqual(settings.uuPasteMode, .compatibility)
-        XCTAssertEqual(gate.state, .unconfirmed(first))
-        XCTAssertFalse(gate.begin(requestId: second))
-    }
-
-    func testDirectSessionStartPreflightAllowsIdleGate() {
+    func testControllerMilestonesAreAppendedWithIndependentTimestamps() async throws {
+        let sender = ControllableOrderSender()
+        let logger = PasteOrderEventLogger(side: "controller-test", databaseURL: FileManager.default.temporaryDirectory.appendingPathComponent("paste-orders-\(UUID().uuidString).sqlite3"))
+        let coordinator = DirectPasteOrderCoordinator(
+            logger: logger,
+            sendOperation: { text, identity, event in try await sender.send(text: text, identity: identity, transportEvent: event) }
+        )
+        let identity = submit("milestones", to: coordinator)
+        try await sender.waitForRequestCount(1)
+        await sender.succeed(identity)
+        try await waitUntil { coordinator.state(for: identity.requestId) == .acknowledgedEventPosted }
+        logger.flush()
         XCTAssertEqual(
-            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: .idle),
-            .start
+            logger.storedEventSummaries().map(\.event),
+            ["recording_started", "transcription_ready", "request_created", "http_send_started", "response_received", "ack_validated"]
         )
     }
 
-    func testDirectSessionStartPreflightMarksInFlightRequestAndStopsWithoutNewRequest() {
-        let previous = UUID()
-        let wouldBeNewRequest = UUID()
-        var gate = DirectPasteRequestGate()
-        XCTAssertTrue(gate.begin(requestId: previous))
-
-        XCTAssertEqual(
-            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: gate.state),
-            .markInFlightUnconfirmedAndStop
+    func testControllerLifecycleMilestonesAppendWithoutTextOrHash() {
+        let logger = PasteOrderEventLogger(
+            side: "controller-test",
+            databaseURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("paste-orders-\(UUID().uuidString).sqlite3")
         )
-        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
-        XCTAssertEqual(gate.state, .unconfirmed(previous))
-        XCTAssertFalse(gate.begin(requestId: wouldBeNewRequest))
-    }
-
-    func testDirectSessionStartPreflightBlocksUnconfirmedGateWithoutNewRequestOrRoute() {
-        let previous = UUID()
-        let wouldBeNewRequest = UUID()
-        var gate = DirectPasteRequestGate()
-        XCTAssertTrue(gate.begin(requestId: previous))
-        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
-
-        XCTAssertEqual(
-            DirectPasteSessionStartPolicy.decision(mode: .direct, gateState: gate.state),
-            .blockedByPreviousUnconfirmedAndStop
+        let coordinator = DirectPasteOrderCoordinator(
+            logger: logger,
+            sendOperation: { _, _, _ in throw TestWaitError.timeout }
         )
-        XCTAssertEqual(gate.state, .unconfirmed(previous))
-        XCTAssertFalse(gate.begin(requestId: wouldBeNewRequest))
+        let identity = coordinator.beginRecording()
+        let events: [DirectPasteLifecycleEvent] = [
+            .focusReady,
+            .inputSourceReady,
+            .functionKeyDownPosted,
+            .markedTextStarted,
+            .functionKeyUpPosted,
+            .markedTextCommitted,
+            .finalTextLocked
+        ]
+        for event in events {
+            coordinator.recordLifecycleEvent(identity: identity, event: event)
+        }
+        logger.flush()
+
+        let rows = logger.storedEventSummaries()
+        XCTAssertEqual(rows.map(\.event), ["recording_started"] + events.map(\.rawValue))
+        XCTAssertTrue(rows.allSatisfy { $0.textSHA256 == nil })
     }
-
-    func testCompatibilitySessionStartPreflightAllowsExistingUnconfirmedGate() {
-        let previous = UUID()
-        var gate = DirectPasteRequestGate()
-        XCTAssertTrue(gate.begin(requestId: previous))
-        XCTAssertTrue(gate.markUnconfirmed(requestId: previous))
-
-        XCTAssertEqual(
-            DirectPasteSessionStartPolicy.decision(mode: .compatibility, gateState: gate.state),
-            .start
+    private func submit(_ text: String, to coordinator: DirectPasteOrderCoordinator) -> PasteOrderIdentity {
+        let identity = coordinator.beginRecording()
+        coordinator.transcriptionReady(identity: identity, textLength: text.count)
+        coordinator.submit(identity: identity, text: text, targetProcessIdentifier: 1, targetBundleIdentifier: "target")
+        return identity
+    }
+    private func makeCoordinator(sender: ControllableOrderSender, countChanged: @escaping (Int) -> Void = { _ in }) -> DirectPasteOrderCoordinator {
+        DirectPasteOrderCoordinator(
+            logger: PasteOrderEventLogger(side: "controller-test", databaseURL: FileManager.default.temporaryDirectory.appendingPathComponent("paste-orders-\(UUID().uuidString).sqlite3")),
+            sendOperation: { text, identity, event in try await sender.send(text: text, identity: identity, transportEvent: event) },
+            onUnconfirmedCountChanged: countChanged
         )
-        XCTAssertEqual(gate.state, .unconfirmed(previous))
     }
-
-    func testDirectGateReturnsToIdleOnlyAfterMatchingAcknowledgement() {
-        let first = UUID()
-        let different = UUID()
-        var gate = DirectPasteRequestGate()
-
-        XCTAssertTrue(gate.begin(requestId: first))
-        XCTAssertFalse(gate.acknowledge(requestId: different))
-        XCTAssertEqual(gate.state, .inFlight(first))
-        XCTAssertTrue(gate.acknowledge(requestId: first))
-        XCTAssertEqual(gate.state, .idle)
+    private func waitUntil(timeoutNanoseconds: UInt64 = 2_000_000_000, condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while !condition() {
+            if DispatchTime.now().uptimeNanoseconds >= deadline { throw TestWaitError.timeout }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
-
 }
 
 final class RemoteClipboardClientTests: XCTestCase {
@@ -379,131 +416,116 @@ final class RemoteClipboardClientTests: XCTestCase {
         StubURLProtocol.requestHandler = nil
         super.tearDown()
     }
-
-    func testRemotePasteRequiresMatchingRequestHashAndEventAcknowledgement() async throws {
-        let requestId = UUID()
-        let text = "remote paste test"
+    func testV2RequestAndAcknowledgementValidateAllIdentityFields() async throws {
+        let identity = PasteOrderIdentity(requestId: UUID(), controllerSessionId: UUID(), sequence: 42)
         StubURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.url?.path, "/paste")
-            XCTAssertEqual(request.httpMethod, "POST")
-            let requestBody = try request.capturedBody()
-            let requestJSON = try XCTUnwrap(
-                JSONSerialization.jsonObject(with: requestBody) as? [String: String]
-            )
-            XCTAssertEqual(requestJSON["requestId"], requestId.uuidString)
-            XCTAssertEqual(requestJSON["text"], text)
-
-            let responseJSON: [String: Any] = [
-                "ok": true,
-                "protocolVersion": RemoteClipboardClient.protocolVersion,
-                "sha256": "e5e423eff5368461ebd6009241487740ba223d6bc12e13f777cb191f2484a8c5",
-                "changeCount": 42,
-                "requestId": requestId.uuidString,
-                "eventPosted": true,
-                "targetProcessIdentifier": 123,
-                "targetBundleIdentifier": "com.example.target"
-            ]
-            let data = try JSONSerialization.data(withJSONObject: responseJSON)
-            let response = try XCTUnwrap(
-                HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)
-            )
-            return (response, data)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: request.capturedBody()) as? [String: Any])
+            XCTAssertEqual(json["requestId"] as? String, identity.requestId.uuidString)
+            XCTAssertEqual(json["controllerSessionId"] as? String, identity.controllerSessionId.uuidString)
+            XCTAssertEqual((json["sequence"] as? NSNumber)?.int64Value, identity.sequence)
+            XCTAssertEqual(json["text"] as? String, "remote paste test")
+            return try Self.response(for: request, json: Self.validResponseJSON(identity: identity))
         }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let client = RemoteClipboardClient(
-            baseURL: URL(string: "http://127.0.0.1:17771")!,
-            session: URLSession(configuration: configuration)
-        )
-
-        let acknowledgement = try await client.paste(text: text, requestId: requestId)
-        XCTAssertTrue(acknowledgement.eventPosted)
-        XCTAssertEqual(acknowledgement.requestId, requestId)
-        XCTAssertEqual(acknowledgement.targetProcessIdentifier, 123)
-        XCTAssertEqual(acknowledgement.targetBundleIdentifier, "com.example.target")
+        var events: [RemoteClipboardTransportEvent] = []
+        let ack = try await makeClient().paste(text: "remote paste test", identity: identity, onTransportEvent: { events.append($0) })
+        XCTAssertEqual(ack.requestId, identity.requestId)
+        XCTAssertEqual(ack.controllerSessionId, identity.controllerSessionId)
+        XCTAssertEqual(ack.sequence, identity.sequence)
+        XCTAssertEqual(events.count, 1)
     }
-
-    func testRemotePasteRejectsAcknowledgementWithoutPostedEvent() async throws {
-        let requestId = UUID()
-        StubURLProtocol.requestHandler = { request in
-            let responseJSON: [String: Any] = [
-                "ok": true,
-                "protocolVersion": RemoteClipboardClient.protocolVersion,
-                "sha256": "e5e423eff5368461ebd6009241487740ba223d6bc12e13f777cb191f2484a8c5",
-                "changeCount": 42,
-                "requestId": requestId.uuidString,
-                "eventPosted": false,
-                "targetProcessIdentifier": 123
-            ]
-            let data = try JSONSerialization.data(withJSONObject: responseJSON)
-            let response = try XCTUnwrap(
-                HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)
-            )
-            return (response, data)
-        }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let client = RemoteClipboardClient(
-            baseURL: URL(string: "http://127.0.0.1:17771")!,
-            session: URLSession(configuration: configuration)
-        )
-
-        do {
-            _ = try await client.paste(text: "remote paste test", requestId: requestId)
-            XCTFail("A paste response without eventPosted must not be accepted")
-        } catch let error as RemoteClipboardClientError {
-            guard case .rejected = error else {
-                return XCTFail("Expected rejected acknowledgement, got \(error)")
+    func testIdentityHashProtocolAndEventMismatchesFailOnlyThisCall() async throws {
+        let identity = PasteOrderIdentity(requestId: UUID(), controllerSessionId: UUID(), sequence: 7)
+        let mutations: [(inout [String: Any]) -> Void] = [
+            { $0["requestId"] = UUID().uuidString }, { $0["controllerSessionId"] = UUID().uuidString },
+            { $0["sequence"] = 999 }, { $0["sha256"] = "bad" },
+            { $0["protocolVersion"] = 1 }, { $0["eventPosted"] = false }
+        ]
+        for mutate in mutations {
+            StubURLProtocol.requestHandler = { request in
+                var json = Self.validResponseJSON(identity: identity)
+                mutate(&json)
+                return try Self.response(for: request, json: json)
             }
+            do {
+                _ = try await makeClient().paste(text: "remote paste test", identity: identity)
+                XCTFail("Mismatched acknowledgement must fail")
+            } catch { XCTAssertTrue(error is RemoteClipboardClientError) }
         }
     }
-
-    func testRemotePasteRejectsMismatchedRequestId() async throws {
-        let requestId = UUID()
-        StubURLProtocol.requestHandler = { request in
-            let responseJSON: [String: Any] = [
-                "ok": true,
-                "protocolVersion": RemoteClipboardClient.protocolVersion,
-                "sha256": "e5e423eff5368461ebd6009241487740ba223d6bc12e13f777cb191f2484a8c5",
-                "changeCount": 42,
-                "requestId": UUID().uuidString,
-                "eventPosted": true,
-                "targetProcessIdentifier": 123
-            ]
-            let data = try JSONSerialization.data(withJSONObject: responseJSON)
-            let response = try XCTUnwrap(
-                HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)
-            )
-            return (response, data)
-        }
-
+    private func makeClient() -> RemoteClipboardClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
-        let client = RemoteClipboardClient(
-            baseURL: URL(string: "http://127.0.0.1:17771")!,
-            session: URLSession(configuration: configuration)
-        )
+        return RemoteClipboardClient(baseURL: URL(string: "http://127.0.0.1:17771")!, session: URLSession(configuration: configuration))
+    }
+    private static func validResponseJSON(identity: PasteOrderIdentity) -> [String: Any] {
+        ["ok": true, "protocolVersion": RemoteClipboardClient.protocolVersion,
+         "sha256": "e5e423eff5368461ebd6009241487740ba223d6bc12e13f777cb191f2484a8c5", "changeCount": 42,
+         "requestId": identity.requestId.uuidString, "controllerSessionId": identity.controllerSessionId.uuidString,
+         "sequence": identity.sequence, "eventPosted": true, "targetProcessIdentifier": 123,
+         "targetBundleIdentifier": "com.example.target"]
+    }
+    private static func response(for request: URLRequest, json: [String: Any]) throws -> (HTTPURLResponse, Data) {
+        let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+        return (response, try JSONSerialization.data(withJSONObject: json))
+    }
+}
 
-        do {
-            _ = try await client.paste(text: "remote paste test", requestId: requestId)
-            XCTFail("A paste response with a different requestId must not be accepted")
-        } catch let error as RemoteClipboardClientError {
-            guard case .requestMismatch = error else {
-                return XCTFail("Expected request mismatch, got \(error)")
-            }
+final class PasteOrderEventLoggerTests: XCTestCase {
+    func testSchemaStoresBothTimestampsAndDoesNotPersistDefaultHash() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("events-\(UUID().uuidString).sqlite3")
+        let logger = PasteOrderEventLogger(side: "test", databaseURL: url)
+        let identity = PasteOrderIdentity(requestId: UUID(), controllerSessionId: UUID(), sequence: 1)
+        logger.capture(identity: identity, event: "request_created", protocolVersion: 2, textLength: 11)
+        logger.flush()
+        let columns = logger.schemaColumnNames()
+        XCTAssertTrue(columns.isSuperset(of: ["request_id", "controller_session_id", "sequence", "process_instance_id", "side", "event", "event_at_utc_ms", "event_at_monotonic_ns", "protocol_version", "text_length", "text_sha256", "target_pid", "target_bundle_id", "pasteboard_change_count", "http_status", "error_code", "duration_ms", "details_json"]))
+        let row = try XCTUnwrap(logger.storedEventSummaries().first)
+        XCTAssertGreaterThan(row.eventAtUTCMilliseconds, 0)
+        XCTAssertGreaterThan(row.eventAtMonotonicNanoseconds, 0)
+        XCTAssertNil(row.textSHA256)
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let permissions = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        XCTAssertEqual(permissions & 0o777, 0o600)
+        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: url.path + suffix) {
+            let sidecarAttributes = try FileManager.default.attributesOfItem(atPath: url.path + suffix)
+            let sidecarPermissions = (sidecarAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+            XCTAssertEqual(sidecarPermissions & 0o777, 0o600)
         }
     }
 }
 
+private actor ControllableOrderSender {
+    typealias Continuation = CheckedContinuation<RemotePasteAcknowledgement, Error>
+    private var continuations: [UUID: Continuation] = [:]
+    private var transportEvents: [UUID: (RemoteClipboardTransportEvent) -> Void] = [:]
+    private var counts: [UUID: Int] = [:]
+    func send(text: String, identity: PasteOrderIdentity, transportEvent: @escaping (RemoteClipboardTransportEvent) -> Void) async throws -> RemotePasteAcknowledgement {
+        counts[identity.requestId, default: 0] += 1
+        transportEvents[identity.requestId] = transportEvent
+        return try await withCheckedThrowingContinuation { continuations[identity.requestId] = $0 }
+    }
+    func succeed(_ identity: PasteOrderIdentity) {
+        transportEvents.removeValue(forKey: identity.requestId)?(.responseReceived(httpStatus: 200, durationMilliseconds: 1))
+        continuations.removeValue(forKey: identity.requestId)?.resume(returning: RemotePasteAcknowledgement(ok: true, protocolVersion: 2, sha256: "unused", changeCount: 1, requestId: identity.requestId, controllerSessionId: identity.controllerSessionId, sequence: identity.sequence, eventPosted: true, targetProcessIdentifier: 123, targetBundleIdentifier: "target"))
+    }
+    func fail(_ identity: PasteOrderIdentity, error: Error) {
+        transportEvents[identity.requestId] = nil
+        continuations.removeValue(forKey: identity.requestId)?.resume(throwing: error)
+    }
+    func sendCount(for requestId: UUID) -> Int { counts[requestId, default: 0] }
+    func waitForRequestCount(_ expected: Int) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+        while counts.values.reduce(0, +) < expected {
+            if DispatchTime.now().uptimeNanoseconds >= deadline { throw TestWaitError.timeout }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+}
+private enum TestWaitError: Error { case timeout }
 private final class StubURLProtocol: URLProtocol {
     static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
     override class func canInit(with request: URLRequest) -> Bool { true }
-
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
     override func startLoading() {
         do {
             let handler = try XCTUnwrap(Self.requestHandler)
@@ -511,27 +533,19 @@ private final class StubURLProtocol: URLProtocol {
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
-
     override func stopLoading() {}
 }
-
 private extension URLRequest {
     func capturedBody() throws -> Data {
         if let httpBody { return httpBody }
         let stream = try XCTUnwrap(httpBodyStream)
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 1024)
+        stream.open(); defer { stream.close() }
+        var data = Data(); var buffer = [UInt8](repeating: 0, count: 1024)
         while stream.hasBytesAvailable {
             let count = stream.read(&buffer, maxLength: buffer.count)
-            if count < 0 {
-                throw stream.streamError ?? URLError(.cannotDecodeContentData)
-            }
+            if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeContentData) }
             if count == 0 { break }
             data.append(contentsOf: buffer.prefix(count))
         }

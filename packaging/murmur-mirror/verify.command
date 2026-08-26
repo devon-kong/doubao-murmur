@@ -39,8 +39,8 @@ print "架构：$(/usr/bin/lipo -archs "${helper_path}")"
 
 health="$(/usr/bin/curl --fail --silent --show-error --max-time 3 http://127.0.0.1:17771/health)"
 print "健康检查：${health}"
-[[ "${health}" == *'"ok":true'* && "${health}" == *'"protocolVersion":1'* ]] || {
-    print -u2 "健康响应不符合 protocolVersion 1。"
+[[ "${health}" == *'"ok":true'* && "${health}" == *'"protocolVersion":2'* ]] || {
+    print -u2 "健康响应不符合 protocolVersion 2。"
     exit 1
 }
 

@@ -22,6 +22,9 @@ targets:
       - path: doubao-murmur
         excludes:
           - "*.md"
+      - path: Shared
+    dependencies:
+      - sdk: libsqlite3.tbd
     settings:
       base:
         INFOPLIST_FILE: doubao-murmur/Info.plist
@@ -69,6 +72,9 @@ targets:
     platform: macOS
     sources:
       - path: murmur-mirror
+      - path: Shared
+    dependencies:
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.doubao.murmur.mirror

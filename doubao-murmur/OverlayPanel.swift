@@ -3,8 +3,11 @@ import SwiftUI
 
 class OverlayPanel: NSPanel {
     private let appState: AppState
-    private weak var textView: NSTextView?
+    private weak var textView: IMETrackingTextView?
+    private var focusRequestID: UUID?
+    private var focusCompletion: ((Bool) -> Void)?
     var onCancel: (() -> Void)?
+    var onMarkedTextStateChanged: ((Bool) -> Void)?
 
     override var canBecomeKey: Bool { true }
 
@@ -42,7 +45,7 @@ class OverlayPanel: NSPanel {
         self.contentView = hostingView
     }
 
-    func showOverlay() {
+    func showOverlay(onFocusReady: @escaping (Bool) -> Void) {
         print("[OverlayPanel] showOverlay called")
         // Reposition to top-center in case screen changed
         if let screen = NSScreen.main {
@@ -55,17 +58,24 @@ class OverlayPanel: NSPanel {
             setFrame(frame, display: true)
         }
         orderFrontRegardless()
-        focusTextInput()
+        requestTextInputFocus(onReady: onFocusReady)
         print("[OverlayPanel] ✅ Overlay is now visible (isVisible=\(isVisible), isKeyWindow=\(isKeyWindow))")
     }
 
-    func focusTextInput() {
+    func maintainTextInputFocus() {
         makeKey()
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.makeKey()
-            self.makeFirstResponder(self.textView)
+        if let textView {
+            makeFirstResponder(textView)
         }
+    }
+
+    func cancelTextInputFocusRequest() {
+        focusRequestID = nil
+        focusCompletion = nil
+    }
+
+    var hasMarkedText: Bool {
+        textView?.hasMarkedText() ?? false
     }
 
     func hideOverlay() {
@@ -85,9 +95,7 @@ class OverlayPanel: NSPanel {
     /// cannot be drawn during the next panel presentation.
     func clearText() {
         guard let textView else { return }
-        textView.unmarkText()
-        textView.string = ""
-        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.clearProgrammatically()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -99,10 +107,37 @@ class OverlayPanel: NSPanel {
         }
     }
 
-    private func installTextView(_ textView: NSTextView) {
+    private func installTextView(_ textView: IMETrackingTextView) {
         self.textView = textView
-        if isVisible {
-            focusTextInput()
+        textView.onMarkedTextStateChanged = { [weak self] hasMarkedText in
+            self?.onMarkedTextStateChanged?(hasMarkedText)
+        }
+        attemptPendingTextInputFocus()
+    }
+
+    private func requestTextInputFocus(onReady: @escaping (Bool) -> Void) {
+        let requestID = UUID()
+        focusRequestID = requestID
+        focusCompletion = onReady
+        attemptPendingTextInputFocus()
+    }
+
+    private func attemptPendingTextInputFocus() {
+        guard let requestID = focusRequestID,
+              let textView else { return }
+        makeKey()
+        let accepted = makeFirstResponder(textView)
+        DispatchQueue.main.async { [weak self, weak textView] in
+            guard let self,
+                  let textView,
+                  self.focusRequestID == requestID else { return }
+            let confirmed = accepted
+                && self.isKeyWindow
+                && self.firstResponder === textView
+            let completion = self.focusCompletion
+            self.focusRequestID = nil
+            self.focusCompletion = nil
+            completion?(confirmed)
         }
     }
 }

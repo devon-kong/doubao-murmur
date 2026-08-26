@@ -51,6 +51,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let statusMenuItem = NSMenuItem(title: "豆包输入法语音输入", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        if appState.unconfirmedDirectPasteCount > 0 {
+            let unknownItem = NSMenuItem(
+                title: "快速粘贴状态未知：\(appState.unconfirmedDirectPasteCount) 笔（后续输入不受影响）",
+                action: nil,
+                keyEquivalent: ""
+            )
+            unknownItem.isEnabled = false
+            menu.addItem(unknownItem)
+        }
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeUUPasteModeItem())
         menu.addItem(makePasteDelayItem())

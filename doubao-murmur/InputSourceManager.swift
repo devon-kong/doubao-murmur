@@ -3,6 +3,7 @@ import Foundation
 
 /// Selects the installed Doubao input source using macOS's public Text Input
 /// Services API and restores the source that was active before a voice-input session.
+@MainActor
 final class InputSourceManager {
     static let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 
@@ -24,6 +25,15 @@ final class InputSourceManager {
         return TISSelectInputSource(inputSource) == noErr
     }
 
+    func selectAndConfirmDoubaoInputSource() -> Bool {
+        guard selectDoubaoInputSource(),
+              let current = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              inputSourceIdentifier(current) == Self.doubaoInputSourceID else {
+            return false
+        }
+        return true
+    }
+
     func restorePreviousInputSource() {
         defer { previousInputSource = nil }
         guard let previousInputSource else { return }
@@ -37,15 +47,17 @@ final class InputSourceManager {
         let sources = TISCreateInputSourceList(nil, false).takeRetainedValue() as NSArray
         for sourceObject in sources {
             let source = sourceObject as! TISInputSource
-            guard let property = TISGetInputSourceProperty(source, kTISPropertyInputSourceID)
-            else {
-                continue
-            }
-            let identifier = Unmanaged<CFString>.fromOpaque(property).takeUnretainedValue() as String
-            if identifier == inputSourceID {
+            if inputSourceIdentifier(source) == inputSourceID {
                 return source
             }
         }
         return nil
+    }
+
+    private func inputSourceIdentifier(_ source: TISInputSource) -> String? {
+        guard let property = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else {
+            return nil
+        }
+        return Unmanaged<CFString>.fromOpaque(property).takeUnretainedValue() as String
     }
 }

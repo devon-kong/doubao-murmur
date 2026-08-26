@@ -19,6 +19,7 @@
 helper:      ~/Library/Application Support/Doubao Murmur/murmur-mirror
 LaunchAgent: ~/Library/LaunchAgents/com.doubao.murmur.mirror.plist
 日志:        ~/Library/Logs/Doubao Murmur/
+订单事件库:  ~/Library/Application Support/Doubao Murmur/paste-orders-helper.sqlite3
 ```
 
 本包使用 ad-hoc 签名，没有 Apple 公证。安装器不会自动移除 Gatekeeper 隔离属性。若 LaunchAgent 日志明确显示被 macOS 阻止，先核对本包 SHA-256，再只对已安装 helper 执行：
@@ -44,7 +45,7 @@ launchctl kickstart -k "gui/$(id -u)/com.doubao.murmur.mirror"
 5. 双击 `verify.command`。通过条件包括：
 
    ```json
-   {"ok":true,"protocolVersion":1,"accessibilityTrusted":true}
+   {"ok":true,"protocolVersion":2,"accessibilityTrusted":true}
    ```
 
 如果更新 helper 后权限变回 `false`，请在辅助功能列表中移除旧项，再重新添加上述实际路径。ad-hoc 签名无法保证跨构建沿用 TCC 授权。
@@ -80,7 +81,7 @@ curl --fail --silent --show-error --max-time 3 \
 通过条件：
 
 ```json
-{"ok":true,"protocolVersion":1,"accessibilityTrusted":true}
+{"ok":true,"protocolVersion":2,"accessibilityTrusted":true}
 ```
 
 JSON 字段顺序可能不同。若 `accessibilityTrusted` 为 `false`，回到第 2 步；连接失败则检查 Mac mini helper、UU 当前设备、规则启用状态和端口占用。
@@ -90,6 +91,8 @@ JSON 字段顺序可能不同。若 `accessibilityTrusted` 为 `false`，回到�
 1. 在 Mac mini 打开一个无副作用的空白文本框并保持为前台目标。
 2. 在 MacBook 的 Doubao Murmur 选择快速模式，只发起一次短文本录音。
 3. 验收目标是：文本只插入一次、插入到预期输入框。
-4. 若出现“被控制端粘贴未确认”，先观察目标输入框，**不要自动重试**；可切换兼容模式继续使用。
+4. 若控制端菜单显示某笔“状态未知”，先观察目标输入框，**不要重试该笔订单**；状态未知不会阻断后续快速输入。
+
+订单事件库只记录请求标识、顺序、阶段时间、文字长度、目标进程和错误码等诊断元数据，不保存识别文字、剪贴板内容、窗口标题或默认文字哈希。分析问题时应通过 `request_id`、`controller_session_id` 和 `sequence` 与控制端事件库关联。
 
 认证/token 当前按项目决策暂缓。前提是 helper 只监听 Mac mini loopback，UU 也只在 MacBook loopback 建立本地监听。若任何一端暴露到 LAN、长期开放给其他用户或准备公开分发，认证立即升级为部署前必做。

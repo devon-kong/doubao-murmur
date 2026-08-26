@@ -3,7 +3,7 @@ import SwiftUI
 
 struct OverlayView: View {
     @ObservedObject var appState: AppState
-    let onTextViewReady: (NSTextView) -> Void
+    let onTextViewReady: (IMETrackingTextView) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -27,6 +27,52 @@ struct OverlayView: View {
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+    }
+}
+
+final class IMETrackingTextView: NSTextView {
+    var onMarkedTextStateChanged: ((Bool) -> Void)?
+    private var suppressMarkedStateCallbacks = false
+    private var lastReportedMarkedState: Bool?
+
+    override func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        super.setMarkedText(
+            string,
+            selectedRange: selectedRange,
+            replacementRange: replacementRange
+        )
+        reportMarkedStateIfChanged()
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        super.insertText(insertString, replacementRange: replacementRange)
+        reportMarkedStateIfChanged()
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        reportMarkedStateIfChanged()
+    }
+
+    func clearProgrammatically() {
+        suppressMarkedStateCallbacks = true
+        super.unmarkText()
+        string = ""
+        setSelectedRange(NSRange(location: 0, length: 0))
+        lastReportedMarkedState = false
+        suppressMarkedStateCallbacks = false
+    }
+
+    private func reportMarkedStateIfChanged() {
+        guard !suppressMarkedStateCallbacks else { return }
+        let currentState = hasMarkedText()
+        guard lastReportedMarkedState != currentState else { return }
+        lastReportedMarkedState = currentState
+        onMarkedTextStateChanged?(currentState)
     }
 }
 
@@ -63,7 +109,7 @@ private struct RecordingDot: View {
 
 private struct IMETextView: NSViewRepresentable {
     @Binding var text: String
-    let onTextViewReady: (NSTextView) -> Void
+    let onTextViewReady: (IMETrackingTextView) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -77,7 +123,7 @@ private struct IMETextView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
 
-        let textView = NSTextView()
+        let textView = IMETrackingTextView()
         textView.delegate = context.coordinator
         textView.string = text
         textView.font = .systemFont(ofSize: 15)
@@ -103,7 +149,7 @@ private struct IMETextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard let textView = scrollView.documentView as? IMETrackingTextView else { return }
         if textView.string != text && !textView.hasMarkedText() {
             textView.string = text
         }

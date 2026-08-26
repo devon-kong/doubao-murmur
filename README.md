@@ -52,6 +52,16 @@ macOS 菜单栏应用：用本机[豆包输入法](https://www.doubao.com/)做�
 | 开始 / 停止 | `⌃ Control + /` |
 | 取消 | `ESC` |
 
+### 快速模式诊断日志
+
+快速模式会把每笔请求的阶段和耗时追加到控制端：
+
+```text
+~/Library/Application Support/Doubao Murmur/paste-orders-controller.sqlite3
+```
+
+日志不保存识别文字、剪贴板内容或窗口标题；默认也不保存文字哈希，只保存请求标识、顺序、时间、长度、状态和错误码等诊断元数据。单笔回执超时只会在菜单中计为“状态未知”，不会阻断或自动重试后续输入。
+
 ## 开发
 
 - 语言：Swift + SwiftUI

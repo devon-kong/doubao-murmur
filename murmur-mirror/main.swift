@@ -4,10 +4,14 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let serviceProtocolVersion = 1
+private let serviceProtocolVersion = 2
 private let defaultPort: UInt16 = 17771
 private let maxHeaderBytes = 16 * 1024
 private let maxBodyBytes = 64 * 1024
+private let pasteOrderEventLogger = PasteOrderEventLogger(
+    side: "helper",
+    databaseURL: PasteOrderEventLogger.defaultDatabaseURL(side: "helper")
+)
 
 private struct JSONResponse: Encodable {
     let ok: Bool
@@ -16,6 +20,8 @@ private struct JSONResponse: Encodable {
     let sha256: String?
     let changeCount: Int?
     let requestId: UUID?
+    let controllerSessionId: UUID?
+    let sequence: Int64?
     let eventPosted: Bool?
     let targetProcessIdentifier: Int32?
     let targetBundleIdentifier: String?
@@ -27,6 +33,8 @@ private struct JSONResponse: Encodable {
         sha256: String? = nil,
         changeCount: Int? = nil,
         requestId: UUID? = nil,
+        controllerSessionId: UUID? = nil,
+        sequence: Int64? = nil,
         eventPosted: Bool? = nil,
         targetProcessIdentifier: Int32? = nil,
         targetBundleIdentifier: String? = nil,
@@ -38,6 +46,8 @@ private struct JSONResponse: Encodable {
         self.sha256 = sha256
         self.changeCount = changeCount
         self.requestId = requestId
+        self.controllerSessionId = controllerSessionId
+        self.sequence = sequence
         self.eventPosted = eventPosted
         self.targetProcessIdentifier = targetProcessIdentifier
         self.targetBundleIdentifier = targetBundleIdentifier
@@ -51,7 +61,17 @@ private struct ClipboardPayload: Codable {
 
 private struct RemotePastePayload: Codable {
     let requestId: UUID
+    let controllerSessionId: UUID
+    let sequence: Int64
     let text: String
+
+    var identity: PasteOrderIdentity {
+        PasteOrderIdentity(
+            requestId: requestId,
+            controllerSessionId: controllerSessionId,
+            sequence: sequence
+        )
+    }
 }
 
 private struct HTTPResponse {
@@ -72,6 +92,16 @@ private struct HTTPResponse {
             "Content-Length: \(body.count)\r\n" +
             "Connection: close\r\n\r\n"
         return Data(header.utf8) + body
+    }
+}
+
+private struct PasteOperationResult {
+    let status: Int
+    let reason: String
+    let payload: JSONResponse
+
+    var httpResponse: HTTPResponse {
+        HTTPResponse.json(status: status, reason: reason, payload: payload)
     }
 }
 
@@ -211,6 +241,9 @@ private final class MirrorConnection {
     private let socketFileDescriptor: Int32
     private let queue = DispatchQueue(label: "com.doubao.murmur.mirror.connection")
     private var buffer = Data()
+    private var currentPasteIdentity: PasteOrderIdentity?
+    private var currentPasteTextLength: Int?
+    private var requestReceivedMonotonicNanoseconds: UInt64?
 
     init(socketFileDescriptor: Int32) {
         self.socketFileDescriptor = socketFileDescriptor
@@ -344,11 +377,20 @@ private final class MirrorConnection {
         }
 
         guard let payload = try? JSONDecoder().decode(RemotePastePayload.self, from: body) else {
-            return .response(error(status: 400, reason: "Bad Request", message: "Body must contain a UUID requestId and text."))
+            return .response(error(status: 400, reason: "Bad Request", message: "Body must contain requestId, controllerSessionId, sequence, and text."))
         }
         guard !payload.text.isEmpty else {
             return .response(error(status: 422, reason: "Unprocessable Content", message: "text must not be empty."))
         }
+        currentPasteIdentity = payload.identity
+        currentPasteTextLength = payload.text.count
+        requestReceivedMonotonicNanoseconds = DispatchTime.now().uptimeNanoseconds
+        pasteOrderEventLogger.capture(
+            identity: payload.identity,
+            event: "request_received",
+            protocolVersion: serviceProtocolVersion,
+            textLength: payload.text.count
+        )
         return .response(handleRemotePaste(payload))
     }
 
@@ -386,46 +428,86 @@ private final class MirrorConnection {
         case .inProgress:
             return error(status: 409, reason: "Conflict", message: "requestId is already being processed.")
         case .execute:
-            let response: HTTPResponse
+            applyTestPasteEntryDelayIfRequested(payload.identity)
+            let result: PasteOperationResult
             if Thread.isMainThread {
-                response = pasteOnMainThread(payload)
+                result = pasteOnMainThread(payload)
             } else {
-                response = DispatchQueue.main.sync { pasteOnMainThread(payload) }
+                result = DispatchQueue.main.sync { pasteOnMainThread(payload) }
             }
+            // JSON encoding is intentionally outside the main-thread paste
+            // critical section so another connection can enter it immediately.
+            let response = result.httpResponse
+            pasteOrderEventLogger.capture(
+                identity: payload.identity,
+                event: "response_built",
+                protocolVersion: serviceProtocolVersion,
+                textLength: payload.text.count,
+                httpStatus: response.status,
+                durationMilliseconds: elapsedMillisecondsSinceRequestReceived()
+            )
             pasteRequestRegistry.finish(payload.requestId, response: response)
             return response
         }
     }
 
-    private func pasteOnMainThread(_ payload: RemotePastePayload) -> HTTPResponse {
+    private func pasteOnMainThread(_ payload: RemotePastePayload) -> PasteOperationResult {
+        let pasteStarted = DispatchTime.now().uptimeNanoseconds
+        pasteOrderEventLogger.capture(
+            identity: payload.identity,
+            event: "paste_started",
+            protocolVersion: serviceProtocolVersion,
+            textLength: payload.text.count
+        )
         guard AXIsProcessTrusted() else {
-            return error(
+            return pasteError(
                 status: 403,
                 reason: "Forbidden",
                 message: "murmur-mirror needs Accessibility permission before it can post Command-V."
             )
         }
         guard let targetBeforeWrite = NSWorkspace.shared.frontmostApplication else {
-            return error(status: 409, reason: "Conflict", message: "No frontmost application is available for paste.")
+            return pasteError(status: 409, reason: "Conflict", message: "No frontmost application is available for paste.")
         }
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         guard pasteboard.setString(payload.text, forType: .string),
               pasteboard.string(forType: .string) == payload.text else {
-            return error(status: 500, reason: "Internal Server Error", message: "Could not verify clipboard write.")
+            return pasteError(status: 500, reason: "Internal Server Error", message: "Could not verify clipboard write.")
         }
         let sha256 = SHA256.hash(data: Data(payload.text.utf8)).map { String(format: "%02x", $0) }.joined()
+        pasteOrderEventLogger.capture(
+            identity: payload.identity,
+            event: "clipboard_written",
+            protocolVersion: serviceProtocolVersion,
+            textLength: payload.text.count,
+            targetProcessIdentifier: targetBeforeWrite.processIdentifier,
+            targetBundleIdentifier: targetBeforeWrite.bundleIdentifier,
+            pasteboardChangeCount: pasteboard.changeCount,
+            durationMilliseconds: Double(DispatchTime.now().uptimeNanoseconds - pasteStarted) / 1_000_000
+        )
 
         guard let targetBeforeEvent = NSWorkspace.shared.frontmostApplication,
               targetBeforeEvent.processIdentifier == targetBeforeWrite.processIdentifier else {
-            return error(status: 409, reason: "Conflict", message: "Frontmost application changed before paste.")
+            return pasteError(status: 409, reason: "Conflict", message: "Frontmost application changed before paste.")
         }
         guard postCommandV() else {
-            return error(status: 500, reason: "Internal Server Error", message: "Could not create the Command-V events.")
+            return pasteError(status: 500, reason: "Internal Server Error", message: "Could not create the Command-V events.")
         }
 
-        return .json(
+        pasteOrderEventLogger.capture(
+            identity: payload.identity,
+            event: "event_posted",
+            protocolVersion: serviceProtocolVersion,
+            textLength: payload.text.count,
+            targetProcessIdentifier: targetBeforeEvent.processIdentifier,
+            targetBundleIdentifier: targetBeforeEvent.bundleIdentifier,
+            pasteboardChangeCount: pasteboard.changeCount,
+            durationMilliseconds: Double(DispatchTime.now().uptimeNanoseconds - pasteStarted) / 1_000_000
+        )
+
+        return PasteOperationResult(
             status: 200,
             reason: "OK",
             payload: JSONResponse(
@@ -433,11 +515,26 @@ private final class MirrorConnection {
                 sha256: sha256,
                 changeCount: pasteboard.changeCount,
                 requestId: payload.requestId,
+                controllerSessionId: payload.controllerSessionId,
+                sequence: payload.sequence,
                 eventPosted: true,
                 targetProcessIdentifier: targetBeforeEvent.processIdentifier,
                 targetBundleIdentifier: targetBeforeEvent.bundleIdentifier
             )
         )
+    }
+
+    private func pasteError(status: Int, reason: String, message: String) -> PasteOperationResult {
+        PasteOperationResult(
+            status: status,
+            reason: reason,
+            payload: JSONResponse(ok: false, error: message)
+        )
+    }
+
+    private func elapsedMillisecondsSinceRequestReceived() -> Double? {
+        guard let start = requestReceivedMonotonicNanoseconds else { return nil }
+        return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
     }
 
     private func postCommandV() -> Bool {
@@ -459,19 +556,70 @@ private final class MirrorConnection {
 
     private func send(_ response: HTTPResponse) {
         let data = response.wireData()
+        if let identity = currentPasteIdentity {
+            pasteOrderEventLogger.capture(
+                identity: identity,
+                event: "socket_send_started",
+                protocolVersion: serviceProtocolVersion,
+                textLength: currentPasteTextLength,
+                httpStatus: response.status,
+                durationMilliseconds: elapsedMillisecondsSinceRequestReceived()
+            )
+        }
+        applyTestResponseDelayIfRequested()
         var offset = 0
+        var sendError: Int32?
         data.withUnsafeBytes { rawBuffer in
             while offset < data.count {
+                if shouldInjectSendFailure {
+                    sendError = EIO
+                    return
+                }
                 let bytesSent = Darwin.send(socketFileDescriptor, rawBuffer.baseAddress!.advanced(by: offset), data.count - offset, 0)
                 if bytesSent > 0 {
                     offset += Int(bytesSent)
                 } else if bytesSent < 0 && errno == EINTR {
                     continue
                 } else {
+                    sendError = errno
                     return
                 }
             }
         }
+        if let identity = currentPasteIdentity {
+            pasteOrderEventLogger.capture(
+                identity: identity,
+                event: sendError == nil ? "socket_send_completed" : "socket_send_failed",
+                protocolVersion: serviceProtocolVersion,
+                textLength: currentPasteTextLength,
+                httpStatus: response.status,
+                errorCode: sendError,
+                durationMilliseconds: elapsedMillisecondsSinceRequestReceived()
+            )
+        }
+        if let sendError, let identity = currentPasteIdentity {
+            fputs("murmur-mirror response send failed requestId=\(identity.requestId.uuidString) errno=\(sendError)\n", stderr)
+        }
+    }
+
+    private func applyTestResponseDelayIfRequested() {
+        guard let identity = currentPasteIdentity,
+              ProcessInfo.processInfo.environment["MURMUR_MIRROR_TEST_DELAY_REQUEST_ID"] == identity.requestId.uuidString,
+              let raw = ProcessInfo.processInfo.environment["MURMUR_MIRROR_TEST_ACK_DELAY_MS"],
+              let milliseconds = UInt32(raw), milliseconds > 0 else { return }
+        usleep(milliseconds * 1_000)
+    }
+
+    private func applyTestPasteEntryDelayIfRequested(_ identity: PasteOrderIdentity) {
+        guard ProcessInfo.processInfo.environment["MURMUR_MIRROR_TEST_DELAY_PASTE_ENTRY_REQUEST_ID"] == identity.requestId.uuidString,
+              let raw = ProcessInfo.processInfo.environment["MURMUR_MIRROR_TEST_PASTE_ENTRY_DELAY_MS"],
+              let milliseconds = UInt32(raw), milliseconds > 0 else { return }
+        usleep(milliseconds * 1_000)
+    }
+
+    private var shouldInjectSendFailure: Bool {
+        guard let identity = currentPasteIdentity else { return false }
+        return ProcessInfo.processInfo.environment["MURMUR_MIRROR_TEST_FAIL_SEND_REQUEST_ID"] == identity.requestId.uuidString
     }
 }
 
@@ -607,7 +755,12 @@ private struct SmokeClient {
         }
 
         let emptyPasteBody = try JSONEncoder().encode(
-            RemotePastePayload(requestId: UUID(), text: "")
+            RemotePastePayload(
+                requestId: UUID(),
+                controllerSessionId: UUID(),
+                sequence: 1,
+                text: ""
+            )
         )
         let emptyPaste = try request(
             method: "POST",
