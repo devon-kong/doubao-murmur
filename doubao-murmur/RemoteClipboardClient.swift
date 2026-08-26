@@ -2,10 +2,6 @@ import CryptoKit
 import Foundation
 
 /// Typed client for the loopback-only `murmur-mirror` helper.
-///
-/// This is deliberately not connected to the input or paste pipeline yet. The
-/// first integration step only proves the helper protocol and validates every
-/// acknowledgement before a future caller is allowed to synthesize ⌘V.
 struct RemoteClipboardClient {
     static let protocolVersion = 1
 
@@ -51,6 +47,32 @@ struct RemoteClipboardClient {
         return acknowledgement
     }
 
+    @discardableResult
+    func paste(text: String, requestId: UUID) async throws -> RemotePasteAcknowledgement {
+        guard !text.isEmpty else { throw RemoteClipboardClientError.emptyText }
+
+        let body = try JSONEncoder().encode(RemotePasteRequest(requestId: requestId, text: text))
+        let (data, response) = try await send(method: "POST", path: "/paste", body: body)
+        guard response.statusCode == 200 else {
+            throw RemoteClipboardClientError.unexpectedStatus(response.statusCode)
+        }
+
+        let acknowledgement = try JSONDecoder().decode(RemotePasteAcknowledgement.self, from: data)
+        guard acknowledgement.ok, acknowledgement.eventPosted else {
+            throw RemoteClipboardClientError.rejected
+        }
+        guard acknowledgement.protocolVersion == Self.protocolVersion else {
+            throw RemoteClipboardClientError.unsupportedProtocol(acknowledgement.protocolVersion)
+        }
+        guard acknowledgement.requestId == requestId else {
+            throw RemoteClipboardClientError.requestMismatch
+        }
+        guard acknowledgement.sha256 == Self.sha256(of: text) else {
+            throw RemoteClipboardClientError.hashMismatch
+        }
+        return acknowledgement
+    }
+
     private func send(method: String, path: String, body: Data?) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: path, relativeTo: baseURL) else {
             throw RemoteClipboardClientError.invalidEndpoint
@@ -83,6 +105,17 @@ struct ClipboardAcknowledgement: Decodable {
     let changeCount: Int
 }
 
+struct RemotePasteAcknowledgement: Decodable {
+    let ok: Bool
+    let protocolVersion: Int
+    let sha256: String
+    let changeCount: Int
+    let requestId: UUID
+    let eventPosted: Bool
+    let targetProcessIdentifier: Int32
+    let targetBundleIdentifier: String?
+}
+
 private struct HealthResponse: Decodable {
     let ok: Bool
     let protocolVersion: Int
@@ -92,12 +125,18 @@ private struct ClipboardRequest: Encodable {
     let text: String
 }
 
+private struct RemotePasteRequest: Encodable {
+    let requestId: UUID
+    let text: String
+}
+
 enum RemoteClipboardClientError: LocalizedError {
     case invalidEndpoint
     case invalidResponse
     case unexpectedStatus(Int)
     case unsupportedProtocol(Int)
     case hashMismatch
+    case requestMismatch
     case rejected
     case emptyText
 
@@ -108,6 +147,7 @@ enum RemoteClipboardClientError: LocalizedError {
         case let .unexpectedStatus(status): return "Remote clipboard returned HTTP \(status)."
         case let .unsupportedProtocol(version): return "Remote clipboard protocol \(version) is unsupported."
         case .hashMismatch: return "Remote clipboard acknowledgement did not match the submitted text."
+        case .requestMismatch: return "Remote paste acknowledgement did not match the submitted request."
         case .rejected: return "Remote clipboard rejected the request."
         case .emptyText: return "Remote clipboard text must not be empty."
         }

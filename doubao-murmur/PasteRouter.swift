@@ -19,30 +19,6 @@ enum PasteRoute: Equatable {
     case uuDirect
 }
 
-/// Fast mode still needs a short post-ACK settling window for UU's restored
-/// foreground window to become ready to receive synthetic keyboard input.
-/// 0.30 seconds is a conservative initial test value: manual paste succeeded
-/// after roughly one second in the observed failure case. It is not a
-/// validated timing constant and must be verified on the real UU path.
-/// This is intentionally independent from the user's compatibility-mode
-/// clipboard quiet period.
-enum DirectPasteSettlePolicy {
-    static let delay: TimeInterval = 0.30
-
-    static var delayNanoseconds: UInt64 {
-        UInt64(delay * 1_000_000_000)
-    }
-
-    static func shouldPaste(
-        delayHasElapsed: Bool,
-        taskIsCancelled: Bool,
-        generationMatches: Bool,
-        targetIsFrontmost: Bool
-    ) -> Bool {
-        delayHasElapsed && !taskIsCancelled && generationMatches && targetIsFrontmost
-    }
-}
-
 /// Persisted independently from the existing quiet-period value. An absent or
 /// invalid value intentionally keeps every upgrading user on compatibility.
 struct PasteRoutingSettings {
@@ -89,15 +65,14 @@ struct PasteRouter {
         return settings.uuPasteMode == .direct ? .uuDirect : .uuCompatibility
     }
 
-    /// Both UU routes must publish the text locally before the app restores UU
-    /// to the foreground. Compatibility needs time for normal sync; direct
-    /// needs the same prepublish so both channels carry the same current text,
-    /// reducing the risk of UU bidirectional sync overwriting the controlled
-    /// Mac's freshly written clipboard. This never authorizes a paste by itself.
+    /// Compatibility mode publishes locally before restoring UU so its normal
+    /// clipboard channel can start syncing immediately. Direct mode now writes
+    /// and pastes entirely on the controlled Mac, so publishing on the
+    /// controller would only reintroduce a competing clipboard channel.
     static func shouldPrepublishLocalClipboard(for route: PasteRoute) -> Bool {
         switch route {
-        case .local: return false
-        case .uuCompatibility, .uuDirect: return true
+        case .local, .uuDirect: return false
+        case .uuCompatibility: return true
         }
     }
 

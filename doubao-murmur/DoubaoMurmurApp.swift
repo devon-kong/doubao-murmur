@@ -66,7 +66,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func makePasteDelayItem() -> NSMenuItem {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 28))
 
-        let label = NSTextField(labelWithString: "兼容模式等待时间(秒)")
+        let label = NSTextField(labelWithString: "剪贴板稳定时间(秒)")
         label.font = NSFont.menuFont(ofSize: 13)
         label.frame = NSRect(x: 20, y: 4, width: 132, height: 20)
         container.addSubview(label)

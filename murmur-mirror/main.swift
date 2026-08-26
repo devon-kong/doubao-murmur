@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CryptoKit
 import Darwin
 import Foundation
@@ -14,17 +15,42 @@ private struct JSONResponse: Encodable {
     let error: String?
     let sha256: String?
     let changeCount: Int?
+    let requestId: UUID?
+    let eventPosted: Bool?
+    let targetProcessIdentifier: Int32?
+    let targetBundleIdentifier: String?
+    let accessibilityTrusted: Bool?
 
-    init(ok: Bool, error: String? = nil, sha256: String? = nil, changeCount: Int? = nil) {
+    init(
+        ok: Bool,
+        error: String? = nil,
+        sha256: String? = nil,
+        changeCount: Int? = nil,
+        requestId: UUID? = nil,
+        eventPosted: Bool? = nil,
+        targetProcessIdentifier: Int32? = nil,
+        targetBundleIdentifier: String? = nil,
+        accessibilityTrusted: Bool? = nil
+    ) {
         self.ok = ok
         self.protocolVersion = serviceProtocolVersion
         self.error = error
         self.sha256 = sha256
         self.changeCount = changeCount
+        self.requestId = requestId
+        self.eventPosted = eventPosted
+        self.targetProcessIdentifier = targetProcessIdentifier
+        self.targetBundleIdentifier = targetBundleIdentifier
+        self.accessibilityTrusted = accessibilityTrusted
     }
 }
 
 private struct ClipboardPayload: Codable {
+    let text: String
+}
+
+private struct RemotePastePayload: Codable {
+    let requestId: UUID
     let text: String
 }
 
@@ -48,6 +74,48 @@ private struct HTTPResponse {
         return Data(header.utf8) + body
     }
 }
+
+/// A bounded in-memory idempotency gate. A repeated request ID receives the
+/// original response without posting a second keyboard event. The cache is
+/// intentionally process-local; callers must never retry automatically after
+/// a helper restart because the earlier event may already have been delivered.
+private final class PasteRequestRegistry {
+    enum BeginResult {
+        case execute
+        case cached(HTTPResponse)
+        case inProgress
+    }
+
+    private let lock = NSLock()
+    private var inProgress: Set<UUID> = []
+    private var completed: [UUID: HTTPResponse] = [:]
+    private var completionOrder: [UUID] = []
+    private let maximumCompletedRequests = 256
+
+    func begin(_ requestId: UUID) -> BeginResult {
+        lock.lock()
+        defer { lock.unlock() }
+        if let response = completed[requestId] {
+            return .cached(response)
+        }
+        guard !inProgress.contains(requestId) else { return .inProgress }
+        inProgress.insert(requestId)
+        return .execute
+    }
+
+    func finish(_ requestId: UUID, response: HTTPResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        inProgress.remove(requestId)
+        completed[requestId] = response
+        completionOrder.append(requestId)
+        while completionOrder.count > maximumCompletedRequests {
+            completed.removeValue(forKey: completionOrder.removeFirst())
+        }
+    }
+}
+
+private let pasteRequestRegistry = PasteRequestRegistry()
 
 private final class MirrorServer {
     private let socketFileDescriptor: Int32
@@ -240,10 +308,16 @@ private final class MirrorConnection {
             guard path == "/health" else {
                 return .response(error(status: 404, reason: "Not Found", message: "Unknown endpoint."))
             }
-            return .response(.json(status: 200, reason: "OK", payload: JSONResponse(ok: true)))
+            return .response(
+                .json(
+                    status: 200,
+                    reason: "OK",
+                    payload: JSONResponse(ok: true, accessibilityTrusted: AXIsProcessTrusted())
+                )
+            )
         }
 
-        guard path == "/clipboard" else {
+        guard path == "/clipboard" || path == "/paste" else {
             return .response(error(status: 404, reason: "Not Found", message: "Unknown endpoint."))
         }
         guard isJSONContentType(headers["content-type"]) else {
@@ -259,13 +333,23 @@ private final class MirrorConnection {
         guard buffer.count >= headerEnd + contentLength else { return .incomplete }
 
         let body = buffer.subdata(in: headerEnd..<(headerEnd + contentLength))
-        guard let payload = try? JSONDecoder().decode(ClipboardPayload.self, from: body) else {
-            return .response(error(status: 400, reason: "Bad Request", message: "Body must be a JSON object with text."))
+        if path == "/clipboard" {
+            guard let payload = try? JSONDecoder().decode(ClipboardPayload.self, from: body) else {
+                return .response(error(status: 400, reason: "Bad Request", message: "Body must be a JSON object with text."))
+            }
+            guard !payload.text.isEmpty else {
+                return .response(error(status: 422, reason: "Unprocessable Content", message: "text must not be empty."))
+            }
+            return .response(writeClipboard(payload.text))
+        }
+
+        guard let payload = try? JSONDecoder().decode(RemotePastePayload.self, from: body) else {
+            return .response(error(status: 400, reason: "Bad Request", message: "Body must contain a UUID requestId and text."))
         }
         guard !payload.text.isEmpty else {
             return .response(error(status: 422, reason: "Unprocessable Content", message: "text must not be empty."))
         }
-        return .response(writeClipboard(payload.text))
+        return .response(handleRemotePaste(payload))
     }
 
     private func isJSONContentType(_ value: String?) -> Bool {
@@ -293,6 +377,80 @@ private final class MirrorConnection {
         }
         let sha256 = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
         return .json(status: 200, reason: "OK", payload: JSONResponse(ok: true, sha256: sha256, changeCount: pasteboard.changeCount))
+    }
+
+    private func handleRemotePaste(_ payload: RemotePastePayload) -> HTTPResponse {
+        switch pasteRequestRegistry.begin(payload.requestId) {
+        case let .cached(response):
+            return response
+        case .inProgress:
+            return error(status: 409, reason: "Conflict", message: "requestId is already being processed.")
+        case .execute:
+            let response: HTTPResponse
+            if Thread.isMainThread {
+                response = pasteOnMainThread(payload)
+            } else {
+                response = DispatchQueue.main.sync { pasteOnMainThread(payload) }
+            }
+            pasteRequestRegistry.finish(payload.requestId, response: response)
+            return response
+        }
+    }
+
+    private func pasteOnMainThread(_ payload: RemotePastePayload) -> HTTPResponse {
+        guard AXIsProcessTrusted() else {
+            return error(
+                status: 403,
+                reason: "Forbidden",
+                message: "murmur-mirror needs Accessibility permission before it can post Command-V."
+            )
+        }
+        guard let targetBeforeWrite = NSWorkspace.shared.frontmostApplication else {
+            return error(status: 409, reason: "Conflict", message: "No frontmost application is available for paste.")
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(payload.text, forType: .string),
+              pasteboard.string(forType: .string) == payload.text else {
+            return error(status: 500, reason: "Internal Server Error", message: "Could not verify clipboard write.")
+        }
+        let sha256 = SHA256.hash(data: Data(payload.text.utf8)).map { String(format: "%02x", $0) }.joined()
+
+        guard let targetBeforeEvent = NSWorkspace.shared.frontmostApplication,
+              targetBeforeEvent.processIdentifier == targetBeforeWrite.processIdentifier else {
+            return error(status: 409, reason: "Conflict", message: "Frontmost application changed before paste.")
+        }
+        guard postCommandV() else {
+            return error(status: 500, reason: "Internal Server Error", message: "Could not create the Command-V events.")
+        }
+
+        return .json(
+            status: 200,
+            reason: "OK",
+            payload: JSONResponse(
+                ok: true,
+                sha256: sha256,
+                changeCount: pasteboard.changeCount,
+                requestId: payload.requestId,
+                eventPosted: true,
+                targetProcessIdentifier: targetBeforeEvent.processIdentifier,
+                targetBundleIdentifier: targetBeforeEvent.bundleIdentifier
+            )
+        )
+    }
+
+    private func postCommandV() -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
+            return false
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
     }
 
     private func error(status: Int, reason: String, message: String) -> HTTPResponse {
@@ -437,6 +595,29 @@ private struct SmokeClient {
 
         let emptyText = try request(method: "POST", path: "/clipboard", body: Data("{\"text\":\"\"}".utf8), contentType: "application/json")
         guard emptyText.status == 422 else { throw SmokeError.validationFailed("empty text rejection") }
+
+        let missingPasteRequestId = try request(
+            method: "POST",
+            path: "/paste",
+            body: Data("{\"text\":\"safe-validation-only\"}".utf8),
+            contentType: "application/json"
+        )
+        guard missingPasteRequestId.status == 400 else {
+            throw SmokeError.validationFailed("paste requestId rejection")
+        }
+
+        let emptyPasteBody = try JSONEncoder().encode(
+            RemotePastePayload(requestId: UUID(), text: "")
+        )
+        let emptyPaste = try request(
+            method: "POST",
+            path: "/paste",
+            body: emptyPasteBody,
+            contentType: "application/json"
+        )
+        guard emptyPaste.status == 422 else {
+            throw SmokeError.validationFailed("empty paste text rejection")
+        }
 
         let text = "murmur-mirror-smoke-\(UUID().uuidString)"
         let body = try JSONEncoder().encode(ClipboardPayload(text: text))

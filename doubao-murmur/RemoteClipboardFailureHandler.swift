@@ -4,8 +4,6 @@ import Foundation
 enum DirectPasteOutcome {
     case remoteWriteFailed
     case cancelledOrStale
-    case targetUnavailableBeforeRequest
-    case targetFocusChangedAfterAcknowledgement
 }
 
 struct DirectPasteFailurePlan: Equatable {
@@ -19,8 +17,8 @@ struct RemoteClipboardFailurePrompt: Equatable {
     let message: String
 
     static let writeFailure = RemoteClipboardFailurePrompt(
-        title: "被控制端剪贴板写入失败",
-        message: "请检查被控制端助手和 UU 端口映射，或切换到兼容模式。"
+        title: "被控制端粘贴失败",
+        message: "请检查被控制端助手、辅助功能权限和 UU 端口映射，或切换到兼容模式。"
     )
 }
 
@@ -39,10 +37,6 @@ struct DirectPasteFailureHandler {
             return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: true, shouldPaste: false)
         case .cancelledOrStale:
             return DirectPasteFailurePlan(shouldCopyLocally: false, shouldPresentWriteFailure: false, shouldPaste: false)
-        case .targetUnavailableBeforeRequest:
-            return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: false, shouldPaste: false)
-        case .targetFocusChangedAfterAcknowledgement:
-            return DirectPasteFailurePlan(shouldCopyLocally: true, shouldPresentWriteFailure: false, shouldPaste: false)
         }
     }
 

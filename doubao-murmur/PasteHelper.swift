@@ -22,8 +22,24 @@ struct PasteHelper {
     }
 
     private static let pollInterval: TimeInterval = 0.05
-    private static var defendTimeout: TimeInterval { remoteSyncQuietPeriod + 1.5 }
     private static var pasteWorkItem: DispatchWorkItem?
+
+    enum ClipboardDefensePolicy {
+        static let minimumMaximumWait: TimeInterval = 2.0
+
+        static func maximumWait(for stableWindow: TimeInterval) -> TimeInterval {
+            max(minimumMaximumWait, stableWindow * 2)
+        }
+
+        static func canStillSucceed(
+            stableElapsed: TimeInterval,
+            remainingBudget: TimeInterval,
+            stableWindow: TimeInterval
+        ) -> Bool {
+            let remainingStableTime = max(0, stableWindow - stableElapsed)
+            return remainingBudget >= remainingStableTime
+        }
+    }
 
     static func cancelPendingPaste() {
         pasteWorkItem?.cancel()
@@ -42,7 +58,7 @@ struct PasteHelper {
     /// Compatibility path for UU's local → remote clipboard synchronisation.
     /// This intentionally preserves the existing quiet-period and defensive
     /// rewrite algorithm, including a user-customised value.
-    static func copyAndPasteForUUCompatibility(_ text: String) {
+    static func copyAndPasteForUUCompatibility(_ text: String, onTimeout: @escaping () -> Void) {
         cancelPendingPaste()
         let existing = NSPasteboard.general.string(forType: .string)
         if existing == text {
@@ -54,14 +70,15 @@ struct PasteHelper {
             log("local clipboard differs (now \(existing?.count ?? 0) chars); writing this session's text")
             guard writeClipboard(text) else { return }
         }
-        defendThenPaste(text)
+        defendThenPaste(text, onTimeout: onTimeout)
     }
 
     static func copyOnly(_ text: String) {
         _ = writeClipboard(text)
     }
 
-    /// Used only after a direct remote clipboard ACK has been verified.
+    /// Posts a local paste event. The direct UU route intentionally does not
+    /// call this: its helper posts Command-V on the controlled Mac instead.
     static func pasteOnly() {
         simulatePaste()
     }
@@ -73,34 +90,52 @@ struct PasteHelper {
     /// 3. ⌘V is executed on the remote, so we must keep rewriting until the
     ///    local board stays on this session's text long enough for local →
     ///    remote sync, then paste.
-    private static func defendThenPaste(_ text: String) {
+    private static func defendThenPaste(_ text: String, onTimeout: @escaping () -> Void) {
         let startedAt = Date()
+        let stableWindow = remoteSyncQuietPeriod
+        let maximumWait = ClipboardDefensePolicy.maximumWait(for: stableWindow)
+        let deadline = startedAt.addingTimeInterval(maximumWait)
         var stableSince: Date? = Date()
 
         func tick() {
-            let now = Date()
+            var now = Date()
             let current = NSPasteboard.general.string(forType: .string)
             if current != text {
                 log("clipboard stolen (now \(current?.count ?? 0) chars); rewriting this session's text")
                 guard writeClipboard(text) else { return }
                 stableSince = Date()
+                now = Date()
             }
 
             let stableElapsed = stableSince.map { now.timeIntervalSince($0) } ?? 0
-            let timedOut = now.timeIntervalSince(startedAt) >= defendTimeout
-            if stableElapsed >= remoteSyncQuietPeriod || timedOut {
+            if stableElapsed >= stableWindow {
                 if NSPasteboard.general.string(forType: .string) != text {
-                    _ = writeClipboard(text)
-                    let retry = DispatchWorkItem {
-                        log("⌘V after timeout rewrite")
-                        simulatePaste()
-                    }
-                    pasteWorkItem = retry
-                    DispatchQueue.main.asyncAfter(deadline: .now() + remoteSyncQuietPeriod, execute: retry)
+                    guard writeClipboard(text) else { return }
+                    stableSince = Date()
+                } else {
+                    log("⌘V (stable \(String(format: "%.2f", stableElapsed))s)")
+                    pasteWorkItem = nil
+                    simulatePaste()
                     return
                 }
-                log("⌘V (stable \(String(format: "%.2f", stableElapsed))s)")
-                simulatePaste()
+            }
+
+            now = Date()
+            let remainingBudget = max(0, deadline.timeIntervalSince(now))
+            let currentStableElapsed = stableSince.map { max(0, now.timeIntervalSince($0)) } ?? 0
+            let canStillSucceed = ClipboardDefensePolicy.canStillSucceed(
+                stableElapsed: currentStableElapsed,
+                remainingBudget: remainingBudget,
+                stableWindow: stableWindow
+            )
+            if now >= deadline || !canStillSucceed {
+                log(
+                    "compatibility timeout after \(String(format: "%.2f", now.timeIntervalSince(startedAt)))s " +
+                    "(stableWindow=\(String(format: "%.2f", stableWindow))s, maxWait=\(String(format: "%.2f", maximumWait))s)"
+                )
+                _ = writeClipboard(text)
+                pasteWorkItem = nil
+                onTimeout()
                 return
             }
 
