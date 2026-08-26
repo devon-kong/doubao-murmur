@@ -69,6 +69,17 @@ murmur-mirror Release build                   通过
 
 安全 smoke 仅调用 `/health`、无效的 `/paste` 请求及 `/clipboard` 往返，并恢复原剪贴板；它没有调用有效 `/paste`，不会触发真实 Command-V。
 
+## 发布后独立 review / 当前暂停点
+
+外部 ChatGPT 5.6 Sol / Pro 已完成仓库克隆和源码扫描，但正式 A-F 结构化输出因 ChatGPT Internal Server Error 未生成；不能把它表述为已有完整报告。以下核心 findings 已由主 agent 对照当前代码独立确认：
+
+1. **P1：最长等待边界可被绕过。** `PasteHelper.defendThenPaste` 在 `stableElapsed >= stableWindow` 的成功分支先执行 `simulatePaste()`，`deadline` / 可达性判断位于其后。若主队列调度延迟，可能已经超过 `maxWait` 仍然粘贴，违反最长等待承诺。修复方向：任何成功粘贴前先验证 `now <= deadline`，并使用统一终止路径。
+2. **P1：兼容模式缺少最终目标前台复查。** 它只在开始防守前等待目标 App 成为前台；Q 等待期间没有最终目标 PID / 前台复查。用户在此间切换 App 后，Command-V 可能发往其他前台 App。修复方向：将目标身份传入，粘贴前复查；失败时保留文字并提示，且不粘贴。
+3. **P2：稳定性未涵盖同文本的剪贴板变动。** 当前只比较字符串，未使用 `NSPasteboard.changeCount`；若剪贴板在两个 `0.05s` tick 之间被改写后恢复相同文本，稳定窗口不会重置。修复方向：记录并复查 `changeCount`，任何变化都重置稳定计时；自身 rewrite 后要更新基线。
+4. **缺失测试。** 需要覆盖：deadline 后的 tick 不得粘贴、等待中目标切换不得粘贴、`changeCount` 改变但文本相同必须重置，以及真实 timer / clipboard integration。快速模式还需要覆盖 Mac mini Accessibility、有效 `/paste`、ACK 丢失、幂等和 UU 端到端场景。
+
+**当前结论：**快速模式未发现新的代码级 blocker；兼容模式在上述两项 P1 修复前暂停部署和实机验收。不要因为既有构建、XCTest 或安全 smoke 通过而绕过这个暂停点。
+
 ## Git 状态（写本文档前）
 
 ```text
