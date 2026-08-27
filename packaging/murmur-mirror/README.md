@@ -95,4 +95,14 @@ JSON 字段顺序可能不同。若 `accessibilityTrusted` 为 `false`，回到�
 
 订单事件库只记录请求标识、顺序、阶段时间、文字长度、目标进程和错误码等诊断元数据，不保存识别文字、剪贴板内容、窗口标题或默认文字哈希。分析问题时应通过 `request_id`、`controller_session_id` 和 `sequence` 与控制端事件库关联。
 
+## 6. MacBook 端操作与快速模式最小验收
+
+本 helper 仍来自发布提交 `aa469c2`；它不是 build13 重新打包的 helper。MacBook 控制端 build13 的正确操作是：
+
+1. 在目标输入框前按一次 `Control + /` 开始；应用在热键完全释放、焦点和豆包输入法就绪后启动豆包。
+2. 说完后，用户手动按一次**物理右 Command**停止豆包；录音期间重复使用 `Control + /` 会被忽略。
+3. 只在输入法 marked text 的下划线从有到无、且物理右 Command 已抬起后，控制端才提交快速模式订单。
+
+用户已完成快速模式实测并报告文字进入正确目标且只插入一次。若控制端显示“状态未知”，先检查目标框，**不要重试同一笔订单**；`eventPosted=true` 只表示 helper 投递了 `Command-V`，不等于目标应用已消费文字。
+
 认证/token 当前按项目决策暂缓。前提是 helper 只监听 Mac mini loopback，UU 也只在 MacBook loopback 建立本地监听。若任何一端暴露到 LAN、长期开放给其他用户或准备公开分发，认证立即升级为部署前必做。

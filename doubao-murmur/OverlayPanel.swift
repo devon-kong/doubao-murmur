@@ -84,7 +84,8 @@ class OverlayPanel: NSPanel {
         print("[OverlayPanel] ✅ Overlay is now visible (isVisible=\(isVisible), isKeyWindow=\(isKeyWindow))")
     }
 
-    /// Make this panel's text view the client before Fn-up, then return the
+    /// Make this panel's text view the client before the user presses physical
+    /// right Command to stop, then return the
     /// actual AppKit focus state. Callers must treat any non-confirmed state as
     /// a cancellation, never as proof that an IME commit occurred.
     @discardableResult
@@ -95,7 +96,8 @@ class OverlayPanel: NSPanel {
         let status = textInputFocusStatus
         // Treat a refusal as failure even if an AppKit transition happened to
         // leave the old responder in place. We need both an accepted request
-        // and the observable responder identity before releasing Fn.
+        // and the observable responder identity before accepting marked-text
+        // commit as the session's final text.
         guard accepted else {
             return status.isConfirmed ? .textViewNotFirstResponder : status
         }

@@ -1,3 +1,5 @@
+> **历史快照（非当前操作说明）**：本文保留当时的分支、时序与验证记录，可能包含已废弃的操作。当前实现请见[交接索引](README.md)与[build13 最终交接](260828-build13-physical-right-command-final-handoff.md)。
+
 # UU 粘贴重设计：部署前最终交接
 
 更新时间：2026-08-26（Asia/Shanghai）
