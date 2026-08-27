@@ -1,5 +1,11 @@
 import Foundation
 import AppKit
+import os
+
+private let pasteHelperLogger = Logger(
+    subsystem: "com.doubao.murmur",
+    category: "PasteHelper"
+)
 
 struct PasteHelper {
     /// UserDefaults key for the user-configurable paste quiet period.
@@ -96,6 +102,9 @@ struct PasteHelper {
     }
 
     static func cancelPendingPaste() {
+        if pasteWorkItem != nil {
+            log("event=pending_paste_cancelled")
+        }
         pasteWorkItem?.cancel()
         pasteWorkItem = nil
     }
@@ -119,6 +128,10 @@ struct PasteHelper {
     ) {
         cancelPendingPaste()
         let existing = NSPasteboard.general.string(forType: .string)
+        log(
+            "event=compatibility_started textLength=\(text.count) " +
+                "clipboardMatched=\(existing == text) changeCount=\(NSPasteboard.general.changeCount)"
+        )
         if existing == text {
             // Already on the board (written at session finalize). Do NOT
             // rewrite: a changeCount bump can reset UU's outbound-sync
@@ -165,6 +178,10 @@ struct PasteHelper {
         let maximumWait = ClipboardDefensePolicy.maximumWait(for: stableWindow)
         let deadline = startedAt + maximumWait
         var stableSince: TimeInterval? = startedAt
+        log(
+            "event=clipboard_defense_started textLength=\(text.count) " +
+                "quietPeriod=\(stableWindow) maximumWait=\(maximumWait)"
+        )
 
         func failClosed(_ failure: CompatibilityPasteFailure, now: TimeInterval) {
             let retained = writeClipboard(text)
@@ -279,6 +296,7 @@ struct PasteHelper {
 
     private static func log(_ message: String) {
         print("[PasteHelper \(Self.timestamp())] \(message)")
+        pasteHelperLogger.notice("\(message, privacy: .public)")
     }
 
     private static func timestamp() -> String {
@@ -293,18 +311,31 @@ struct PasteHelper {
 
     @discardableResult
     private static func writeClipboard(_ text: String) -> Bool {
-        guard !text.isEmpty else { return false }
+        guard !text.isEmpty else {
+            log("event=clipboard_write_rejected_empty")
+            return false
+        }
         let pasteboard = NSPasteboard.general
+        log(
+            "event=clipboard_write_started textLength=\(text.count) " +
+                "changeCountBefore=\(pasteboard.changeCount)"
+        )
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
-            log("❌ Failed to write transcription text to the clipboard")
+            log("event=clipboard_write_failed_set textLength=\(text.count)")
             return false
         }
         guard pasteboard.string(forType: .string) == text else {
-            log("❌ Clipboard did not retain transcription text after write")
+            log(
+                "event=clipboard_write_failed_verify textLength=\(text.count) " +
+                    "changeCount=\(pasteboard.changeCount)"
+            )
             return false
         }
-        log("✅ Copied transcription text (length: \(text.count))")
+        log(
+            "event=clipboard_write_succeeded textLength=\(text.count) " +
+                "changeCount=\(pasteboard.changeCount)"
+        )
         return true
     }
 
@@ -317,7 +348,12 @@ struct PasteHelper {
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
         keyUp?.flags = .maskCommand
 
+        log(
+            "event=command_v_posting sourceCreated=\(source != nil) " +
+                "keyDownCreated=\(keyDown != nil) keyUpCreated=\(keyUp != nil)"
+        )
         keyDown?.post(tap: .cghidEventTap)
         keyUp?.post(tap: .cghidEventTap)
+        log("event=command_v_posted")
     }
 }

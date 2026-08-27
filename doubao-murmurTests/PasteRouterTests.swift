@@ -178,24 +178,28 @@ final class PasteRouterTests: XCTestCase {
 }
 
 final class RecordingReadinessGateTests: XCTestCase {
-    func testBothReadinessCompletionOrdersAuthorizeExactlyOneFunctionKeyDown() {
+    func testAllThreeReadinessConditionsAuthorizeExactlyOneRightCommandStart() {
         var focusFirst = RecordingReadinessGate()
         let focusFirstActions = [
             focusFirst.markFocusReady(),
             focusFirst.markInputSourceReady(),
+            focusFirst.markHotkeyReleased(),
             focusFirst.markFocusReady(),
-            focusFirst.markInputSourceReady()
+            focusFirst.markInputSourceReady(),
+            focusFirst.markHotkeyReleased()
         ]
-        XCTAssertEqual(focusFirstActions.filter { $0 == .postFunctionKeyDown }.count, 1)
+        XCTAssertEqual(focusFirstActions.filter { $0 == .postRightCommandStart }.count, 1)
 
         var inputSourceFirst = RecordingReadinessGate()
         let inputSourceFirstActions = [
             inputSourceFirst.markInputSourceReady(),
             inputSourceFirst.markFocusReady(),
+            inputSourceFirst.markHotkeyReleased(),
             inputSourceFirst.markInputSourceReady(),
-            inputSourceFirst.markFocusReady()
+            inputSourceFirst.markFocusReady(),
+            inputSourceFirst.markHotkeyReleased()
         ]
-        XCTAssertEqual(inputSourceFirstActions.filter { $0 == .postFunctionKeyDown }.count, 1)
+        XCTAssertEqual(inputSourceFirstActions.filter { $0 == .postRightCommandStart }.count, 1)
     }
 
     func testCancellationRejectsLateReadinessCallbacks() {
@@ -204,10 +208,70 @@ final class RecordingReadinessGateTests: XCTestCase {
         gate.cancel()
         XCTAssertEqual(gate.markInputSourceReady(), .none)
         XCTAssertEqual(gate.markFocusReady(), .none)
+        XCTAssertEqual(gate.markHotkeyReleased(), .none)
+    }
+}
+
+final class StopHotkeyReleaseGateTests: XCTestCase {
+    func testSlashThenControlReleaseTriggersExactlyOnce() {
+        var gate = StopHotkeyReleaseGate()
+
+        XCTAssertTrue(gate.begin())
+        XCTAssertFalse(gate.begin())
+        XCTAssertEqual(gate.observeSlashRelease(), [.slashReleased])
+        XCTAssertEqual(gate.observeControlRelease(), [.controlReleased, .fullyReleased])
+        XCTAssertEqual(gate.observeControlRelease(), [])
+        XCTAssertEqual(gate.observeSlashRelease(), [])
+    }
+
+    func testControlThenSlashReleaseTriggersExactlyOnce() {
+        var gate = StopHotkeyReleaseGate()
+
+        XCTAssertTrue(gate.begin())
+        XCTAssertEqual(gate.observeControlRelease(), [.controlReleased])
+        XCTAssertEqual(gate.observeSlashRelease(), [.slashReleased, .fullyReleased])
+    }
+
+    func testPartialAndRepeatedEventsNeverAuthorizeStop() {
+        var gate = StopHotkeyReleaseGate()
+
+        XCTAssertTrue(gate.begin())
+        XCTAssertEqual(gate.observeSlashRelease(), [.slashReleased])
+        XCTAssertEqual(gate.observeSlashRelease(), [])
+        gate.cancel()
+        XCTAssertEqual(gate.observeControlRelease(), [])
+        XCTAssertEqual(gate.observeSlashRelease(), [])
     }
 }
 
 final class MarkedTextCommitGateTests: XCTestCase {
+    func testTextInputFocusStatusRequiresKeyWindowAndTextViewFirstResponder() {
+        XCTAssertEqual(
+            TextInputFocusStatus.evaluate(
+                panelIsKeyWindow: false,
+                textViewIsAvailable: true,
+                textViewIsFirstResponder: true
+            ),
+            .panelNotKey
+        )
+        XCTAssertEqual(
+            TextInputFocusStatus.evaluate(
+                panelIsKeyWindow: true,
+                textViewIsAvailable: true,
+                textViewIsFirstResponder: false
+            ),
+            .textViewNotFirstResponder
+        )
+        XCTAssertEqual(
+            TextInputFocusStatus.evaluate(
+                panelIsKeyWindow: true,
+                textViewIsAvailable: true,
+                textViewIsFirstResponder: true
+            ),
+            .confirmed
+        )
+    }
+
     func testMarkedTextMustTransitionFromTrueToFalseWhileStoppingBeforeCompletion() {
         var gate = MarkedTextCommitGate()
         XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: false), .none)
@@ -253,6 +317,22 @@ final class MarkedTextCommitGateTests: XCTestCase {
         )
     }
 
+    func testFocusLostAfterFnUpCancelsInsteadOfAuthorizingTextFreeze() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: true), .none)
+        XCTAssertEqual(gate.observeFocus(isConfirmed: false), .focusLost)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
+    }
+
+    func testFocusLostAfterMarkedTextCommitButBeforeFinalLockStillCancels() {
+        var gate = MarkedTextCommitGate()
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: true), .none)
+        XCTAssertEqual(gate.observe(hasMarkedText: false), .markedTextCommitted)
+        XCTAssertEqual(gate.observeFocus(isConfirmed: false), .focusLost)
+    }
+
     func testProgrammaticCleanupCannotCreateCommit() {
         var gate = MarkedTextCommitGate()
         XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
@@ -268,11 +348,127 @@ final class MarkedTextCommitGateTests: XCTestCase {
         XCTAssertTrue(markedStateCallbacks.isEmpty)
     }
 
-    func testNeverMarkedSessionHasNoQuietPeriodOrAutomaticMaximumTimeout() {
+    func testNeverCommittedMarkedTextTimesOutWithoutAuthorizingFreezeOrHide() {
         var gate = MarkedTextCommitGate()
-        XCTAssertNil(MarkedTextCommitGate.automaticCompletionTimeout)
-        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: false), .none)
+        XCTAssertEqual(gate.observe(hasMarkedText: true), .markedTextStarted)
+        XCTAssertEqual(gate.beginStopping(currentlyHasMarkedText: true), .none)
+        XCTAssertEqual(gate.expireWaitingForCommit(), .timedOut)
         XCTAssertEqual(gate.observe(hasMarkedText: false), .none)
+    }
+
+    func testControlSlashDoesNotStopAnActiveRecording() {
+        XCTAssertEqual(SessionTogglePolicy.action(for: .stopping), .cancel)
+        XCTAssertEqual(SessionTogglePolicy.action(for: .preparing), .cancel)
+        XCTAssertEqual(SessionTogglePolicy.action(for: .recording), .ignoreWhileRecording)
+        XCTAssertEqual(SessionTogglePolicy.action(for: .idle), .start)
+    }
+}
+
+final class PhysicalRightCommandStopGateTests: XCTestCase {
+    func testPhysicalUpAndMarkedCommitAuthorizeExactlyOnceInEitherOrder() {
+        let eventOrders: [[(inout PhysicalRightCommandStopGate) -> PhysicalRightCommandStopGate.Action]] = [
+            [
+                { $0.observePhysicalRightCommandDown() },
+                { $0.markMarkedTextCommitted() },
+                { $0.observePhysicalRightCommandUp() }
+            ],
+            [
+                { $0.observePhysicalRightCommandDown() },
+                { $0.observePhysicalRightCommandUp() },
+                { $0.markMarkedTextCommitted() }
+            ]
+        ]
+
+        for events in eventOrders {
+            var gate = PhysicalRightCommandStopGate()
+            let actions = events.map { $0(&gate) }
+            XCTAssertEqual(actions.filter { $0 == .scheduleFinalTextLock }.count, 1)
+            XCTAssertEqual(gate.markMarkedTextCommitted(), .none)
+            XCTAssertEqual(gate.observePhysicalRightCommandUp(), .none)
+        }
+    }
+
+    func testDuplicateAndPartialCallbacksCannotAuthorizeFinalLock() {
+        var gate = PhysicalRightCommandStopGate()
+        XCTAssertEqual(gate.observePhysicalRightCommandDown(), .startedStopping)
+        XCTAssertEqual(gate.observePhysicalRightCommandDown(), .none)
+        XCTAssertEqual(gate.markMarkedTextCommitted(), .none)
+        XCTAssertEqual(gate.markMarkedTextCommitted(), .none)
+        XCTAssertEqual(gate.observePhysicalRightCommandUp(), .scheduleFinalTextLock)
+        XCTAssertEqual(gate.observePhysicalRightCommandUp(), .none)
+    }
+
+    func testNonBareRightCommandCancelsAndCannotAuthorizePaste() {
+        var gate = PhysicalRightCommandStopGate()
+        XCTAssertEqual(gate.observePhysicalRightCommandDown(), .startedStopping)
+        XCTAssertEqual(gate.observeOrdinaryKeyDown(), .nonBareCommand)
+        XCTAssertEqual(gate.observePhysicalRightCommandUp(), .none)
+        XCTAssertEqual(gate.markMarkedTextCommitted(), .none)
+    }
+
+    func testCancellationAndTimeoutRejectLateCallbacks() {
+        var cancelled = PhysicalRightCommandStopGate()
+        XCTAssertEqual(cancelled.observePhysicalRightCommandDown(), .startedStopping)
+        cancelled.cancel()
+        XCTAssertEqual(cancelled.observePhysicalRightCommandUp(), .none)
+        XCTAssertEqual(cancelled.markMarkedTextCommitted(), .none)
+
+        var timedOut = PhysicalRightCommandStopGate()
+        XCTAssertEqual(timedOut.observePhysicalRightCommandDown(), .startedStopping)
+        XCTAssertEqual(timedOut.expireWaiting(), .timedOut)
+        XCTAssertEqual(timedOut.observePhysicalRightCommandUp(), .none)
+        XCTAssertEqual(timedOut.markMarkedTextCommitted(), .none)
+    }
+
+    func testSyntheticStartAndOtherKeysAreNotPhysicalRightCommandStops() {
+        XCTAssertFalse(
+            PhysicalRightCommandEventFilter.isPhysicalRightCommand(
+                keyCode: 54,
+                sourcePID: 12345
+            )
+        )
+        XCTAssertFalse(
+            PhysicalRightCommandEventFilter.isPhysicalRightCommand(
+                keyCode: 55,
+                sourcePID: 0
+            )
+        )
+        XCTAssertTrue(
+            PhysicalRightCommandEventFilter.isPhysicalRightCommand(
+                keyCode: 54,
+                sourcePID: 0
+            )
+        )
+    }
+
+    func testOrdinaryPhysicalKeyFilterRequiresPhysicalKeyDown() {
+        XCTAssertTrue(
+            PhysicalRightCommandEventFilter.isPhysicalOrdinaryKeyDown(
+                type: .keyDown,
+                keyCode: 8,
+                sourcePID: 0
+            )
+        )
+        XCTAssertFalse(
+            PhysicalRightCommandEventFilter.isPhysicalOrdinaryKeyDown(
+                type: .keyDown,
+                keyCode: 54,
+                sourcePID: 0
+            )
+        )
+        XCTAssertFalse(
+            PhysicalRightCommandEventFilter.isPhysicalOrdinaryKeyDown(
+                type: .keyDown,
+                keyCode: 8,
+                sourcePID: 12345
+            )
+        )
+    }
+
+    func testMarkedCommitWithoutPhysicalCommandUpCannotAuthorizeFinalLock() {
+        var gate = PhysicalRightCommandStopGate()
+        XCTAssertEqual(gate.markMarkedTextCommitted(), .none)
+        XCTAssertEqual(gate.observePhysicalRightCommandUp(), .none)
     }
 }
 
@@ -343,7 +539,9 @@ final class DirectPasteOrderCoordinatorTests: XCTestCase {
             .inputSourceSelectionFailed,
             .routeUnavailableBeforeSubmit,
             .focusReadinessFailed,
-            .functionKeyPostFailed
+            .functionKeyPostFailed,
+            .stoppingFocusLost,
+            .markedTextCommitTimedOut
         ]
 
         for reason in reasons {

@@ -1,16 +1,27 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import os
+
+private let sessionLogger = Logger(
+    subsystem: "com.doubao.murmur",
+    category: "InputMethodSession"
+)
+private let functionKeyDiagnosticsLogger = Logger(
+    subsystem: "com.doubao.murmur",
+    category: "FunctionKeyDiagnostics"
+)
 
 struct RecordingReadinessGate {
     enum Action: Equatable {
         case none
-        case postFunctionKeyDown
+        case postRightCommandStart
     }
 
     private var focusIsReady = false
     private var inputSourceIsReady = false
-    private var didAuthorizeFunctionKeyDown = false
+    private var hotkeyIsReleased = false
+    private var didAuthorizeStart = false
     private var isCancelled = false
 
     mutating func markFocusReady() -> Action {
@@ -23,6 +34,11 @@ struct RecordingReadinessGate {
         return authorizationAction()
     }
 
+    mutating func markHotkeyReleased() -> Action {
+        hotkeyIsReleased = true
+        return authorizationAction()
+    }
+
     mutating func cancel() {
         isCancelled = true
     }
@@ -31,9 +47,46 @@ struct RecordingReadinessGate {
         guard !isCancelled,
               focusIsReady,
               inputSourceIsReady,
-              !didAuthorizeFunctionKeyDown else { return .none }
-        didAuthorizeFunctionKeyDown = true
-        return .postFunctionKeyDown
+              hotkeyIsReleased,
+              !didAuthorizeStart else { return .none }
+        didAuthorizeStart = true
+        return .postRightCommandStart
+    }
+}
+
+enum InputMethodSessionPhase: Equatable {
+    case idle
+    case preparing
+    case recording
+    case stopping
+}
+
+enum SessionToggleAction: Equatable {
+    case start
+    case ignoreWhileRecording
+    case cancel
+}
+
+private enum RightCommandTapKind {
+    case start
+
+    var diagnosticPrefix: String {
+        switch self {
+        case .start: "right_command_start"
+        }
+    }
+}
+
+struct SessionTogglePolicy {
+    static func action(for phase: InputMethodSessionPhase) -> SessionToggleAction {
+        switch phase {
+        case .idle:
+            return .start
+        case .preparing, .stopping:
+            return .cancel
+        case .recording:
+            return .ignoreWhileRecording
+        }
     }
 }
 
@@ -42,9 +95,9 @@ struct MarkedTextCommitGate {
         case none
         case markedTextStarted
         case markedTextCommitted
+        case focusLost
+        case timedOut
     }
-
-    static let automaticCompletionTimeout: TimeInterval? = nil
 
     private var didObserveMarkedText = false
     private var isStopping = false
@@ -69,26 +122,106 @@ struct MarkedTextCommitGate {
         return observe(hasMarkedText: currentlyHasMarkedText)
     }
 
+    /// The panel must remain the active text client until the input method has
+    /// committed its marked text. A lost focus is never recovered by assuming
+    /// that the marked text was committed.
+    mutating func observeFocus(isConfirmed: Bool) -> Action {
+        guard !isCancelled, isStopping else { return .none }
+        guard !isConfirmed else { return .none }
+        isCancelled = true
+        return .focusLost
+    }
+
+    /// This is an escape hatch only. It must not authorize a final-text lock,
+    /// because an input method that never unmarks may still hold a partial
+    /// composition.
+    mutating func expireWaitingForCommit() -> Action {
+        guard !isCancelled, isStopping, !didCommit else { return .none }
+        isCancelled = true
+        return .timedOut
+    }
+
     mutating func cancel() {
         isCancelled = true
     }
 }
 
-/// Focus an NSTextView, select Doubao's input source, and hold
-/// the Fn key synthetically while a voice-input session is active.
-@MainActor
-final class InputMethodSessionManager {
-    private enum SessionPhase: Equatable {
-        case idle
-        case preparing
-        case recording
-        case stopping
+/// A physical, bare right Command press is the user's stop gesture. Never
+/// close the text client until that physical key has returned up and Doubao
+/// has committed marked text for this stopping session.
+struct PhysicalRightCommandStopGate {
+    enum Action: Equatable {
+        case none
+        case startedStopping
+        case scheduleFinalTextLock
+        case nonBareCommand
+        case timedOut
     }
 
+    private var markedTextCommitted = false
+    private var physicalRightCommandIsDown = false
+    private var physicalRightCommandUpObserved = false
+    private var didAuthorizeFinalLock = false
+    private var isCancelled = false
+
+    mutating func observePhysicalRightCommandDown() -> Action {
+        guard !isCancelled, !physicalRightCommandIsDown, !physicalRightCommandUpObserved else { return .none }
+        physicalRightCommandIsDown = true
+        return .startedStopping
+    }
+
+    mutating func observePhysicalRightCommandUp() -> Action {
+        guard !isCancelled, physicalRightCommandIsDown else { return .none }
+        physicalRightCommandIsDown = false
+        physicalRightCommandUpObserved = true
+        return authorizationAction()
+    }
+
+    mutating func observeOrdinaryKeyDown() -> Action {
+        guard !isCancelled, physicalRightCommandIsDown else { return .none }
+        isCancelled = true
+        return .nonBareCommand
+    }
+
+    mutating func markMarkedTextCommitted() -> Action {
+        guard !isCancelled else { return .none }
+        markedTextCommitted = true
+        return authorizationAction()
+    }
+
+    mutating func expireWaiting() -> Action {
+        guard !isCancelled, !didAuthorizeFinalLock else { return .none }
+        isCancelled = true
+        return .timedOut
+    }
+
+    mutating func cancel() {
+        isCancelled = true
+    }
+
+    private mutating func authorizationAction() -> Action {
+        guard markedTextCommitted,
+              physicalRightCommandUpObserved,
+              !didAuthorizeFinalLock else { return .none }
+        didAuthorizeFinalLock = true
+        return .scheduleFinalTextLock
+    }
+}
+
+/// Focus an NSTextView, select Doubao's input source, and toggle voice input
+/// with a synthetic right Command click after the physical hotkey is released.
+@MainActor
+final class InputMethodSessionManager {
     /// Poll interval / budget for waiting until UU (or the previous app) is
     /// actually frontmost before publishing the clipboard.
     private static let frontmostPollInterval: TimeInterval = 0.05
     private static let frontmostWaitBudget: TimeInterval = 0.40
+    /// This is not a completion delay. Marked text is still the only normal
+    /// completion signal; the deadline merely prevents a broken IME session
+    /// from leaving the UI in `stopping` forever.
+    private static let markedTextCommitSafetyTimeout: TimeInterval = 1.5
+    private static let stoppingFocusPollInterval: TimeInterval = 0.10
+    private static let rightCommandPressDuration: TimeInterval = 0.03
 
     private let appState: AppState
     private let overlayPanel: OverlayPanel
@@ -96,12 +229,17 @@ final class InputMethodSessionManager {
     private let pasteOrderEventLogger: PasteOrderEventLogger
     private let directPasteOrderCoordinator: DirectPasteOrderCoordinator
     private let inputSourceManager = InputSourceManager()
-    private var phase: SessionPhase = .idle
-    private var functionKeyIsDown = false
+    private var phase: InputMethodSessionPhase = .idle
+    private var rightCommandIsDown = false
+    private var rightCommandReleaseWorkItem: DispatchWorkItem?
+    private var rightCommandTapKind: RightCommandTapKind?
     private var recordingReadinessGate = RecordingReadinessGate()
     private var markedTextCommitGate = MarkedTextCommitGate()
+    private var physicalRightCommandStopGate = PhysicalRightCommandStopGate()
     private var sessionGeneration = UUID()
     private var finalTextLockIsScheduled = false
+    private var stoppingFocusMonitorWorkItem: DispatchWorkItem?
+    private var markedTextCommitTimeoutWorkItem: DispatchWorkItem?
     private var clipboardPublishWorkItem: DispatchWorkItem?
     private var currentDirectPasteIdentity: PasteOrderIdentity?
     private var currentPasteRoute: PasteRoute?
@@ -133,6 +271,14 @@ final class InputMethodSessionManager {
                 switch event {
                 case .toggleRecording:
                     self.handleToggle()
+                case .toggleHotkeyFullyReleased:
+                    self.handleToggleHotkeyFullyReleased()
+                case .physicalRightCommandStopDown:
+                    self.handlePhysicalRightCommandStopDown()
+                case .physicalRightCommandStopUp:
+                    self.handlePhysicalRightCommandStopUp()
+                case .physicalRightCommandStopInterruptedByOrdinaryKey:
+                    self.handlePhysicalRightCommandStopInterruptedByOrdinaryKey()
                 case .cancel:
                     self.cancelSession()
                 }
@@ -158,13 +304,24 @@ final class InputMethodSessionManager {
     }
 
     private func handleToggle() {
-        switch phase {
-        case .idle:
+        switch SessionTogglePolicy.action(for: phase) {
+        case .start:
             startSession()
-        case .preparing, .recording:
-            stopSession()
-        case .stopping:
-            print("[InputMethodSessionManager] Stop is already in progress; ignoring toggle")
+        case .ignoreWhileRecording:
+            logSessionEvent("toggle_ignored_while_recording")
+            return
+        case .cancel:
+            cancelSession()
+            print("[InputMethodSessionManager] Toggle cancelled the in-progress session")
+        }
+    }
+
+    private func handleToggleHotkeyFullyReleased() {
+        switch phase {
+        case .preparing:
+            applyReadinessAction(recordingReadinessGate.markHotkeyReleased())
+        case .idle, .recording, .stopping:
+            return
         }
     }
 
@@ -179,11 +336,13 @@ final class InputMethodSessionManager {
         let generation = sessionGeneration
         recordingReadinessGate = RecordingReadinessGate()
         markedTextCommitGate = MarkedTextCommitGate()
+        physicalRightCommandStopGate = PhysicalRightCommandStopGate()
         finalTextLockIsScheduled = false
         previousFrontmostApp = NSWorkspace.shared.frontmostApplication
         // Capture the destination at recording start. Do not infer it from a
         // window title or from whichever process is frontmost after dictation.
         pasteTargetApp = previousFrontmostApp
+        NSApp.activate(ignoringOtherApps: true)
         let route = PasteRouter().route(for: pasteTargetApp)
         currentPasteRoute = route
         if route == .uuDirect {
@@ -193,6 +352,7 @@ final class InputMethodSessionManager {
         }
 
         phase = .preparing
+        logSessionEvent("session_started", route: route, target: pasteTargetApp)
         appState.transcriptionText = ""
         overlayPanel.clearText()
         appState.errorMessage = nil
@@ -213,6 +373,7 @@ final class InputMethodSessionManager {
                 return
             }
             self.recordDirectLifecycleEvent(.focusReady)
+            self.logSessionEvent("focus_ready", focusStatus: self.overlayPanel.textInputFocusStatus)
             self.applyReadinessAction(self.recordingReadinessGate.markFocusReady())
         }
 
@@ -225,50 +386,75 @@ final class InputMethodSessionManager {
         }
         guard phase == .preparing, sessionGeneration == generation else { return }
         recordDirectLifecycleEvent(.inputSourceReady)
+        logSessionEvent("input_source_ready")
         applyReadinessAction(recordingReadinessGate.markInputSourceReady())
     }
 
     private func applyReadinessAction(_ action: RecordingReadinessGate.Action) {
-        guard action == .postFunctionKeyDown, phase == .preparing else { return }
-        guard setFunctionKeyPressed(true) else {
-            cancelPreparingSession(
-                message: "无法发出语音输入启动事件",
-                reason: .functionKeyPostFailed
+        guard action == .postRightCommandStart, phase == .preparing else { return }
+        postRightCommandTap(kind: .start) { [weak self] posted in
+            guard let self, self.phase == .preparing else { return }
+            guard posted else {
+                self.cancelPreparingSession(
+                    message: "无法发出右 Command 启动事件",
+                    reason: .functionKeyPostFailed
+                )
+                return
+            }
+            self.recordDirectLifecycleEvent(.functionKeyDownPosted)
+            self.phase = .recording
+            self.appState.recordingState = .recording
+            self.logSessionEvent("right_command_start_completed", focusStatus: self.overlayPanel.textInputFocusStatus)
+            print("[InputMethodSessionManager] ✅ Text client and Doubao input source ready; right Command tapped")
+        }
+    }
+
+    private func handlePhysicalRightCommandStopDown() {
+        guard phase == .recording else { return }
+
+        guard physicalRightCommandStopGate.observePhysicalRightCommandDown() == .startedStopping else { return }
+        logSessionEvent("physical_right_command_stop_down", focusStatus: overlayPanel.textInputFocusStatus)
+        let focusStatus = overlayPanel.ensureTextInputFocus()
+        logSessionEvent("pre_physical_right_command_stop_focus_checked", focusStatus: focusStatus)
+        guard focusStatus.isConfirmed else {
+            cancelSession(
+                message: "临时输入框在物理右 Command 停止前失去焦点（\(focusStatus)）",
+                reason: .stoppingFocusLost
             )
             return
         }
-        recordDirectLifecycleEvent(.functionKeyDownPosted)
-        phase = .recording
-        appState.recordingState = .recording
-        print("[InputMethodSessionManager] ✅ Text client and Doubao input source ready; Fn pressed")
-    }
 
-    private func stopSession() {
-        if phase == .preparing {
-            // No Fn event has been sent yet, so a fast second toggle is simply a cancel.
-            cancelSession()
-            return
-        }
-
-        guard phase == .recording else { return }
         phase = .stopping
         appState.recordingState = .stopping
-        if setFunctionKeyPressed(false) {
-            recordDirectLifecycleEvent(.functionKeyUpPosted)
-        } else {
-            print("[InputMethodSessionManager] ⚠️ Failed to post Fn-up")
-        }
-        overlayPanel.maintainTextInputFocus()
+        beginStoppingSafetyMonitoring()
         handleMarkedTextAction(
             markedTextCommitGate.beginStopping(
                 currentlyHasMarkedText: overlayPanel.hasMarkedText
             )
         )
-        print("[InputMethodSessionManager] ⏹ Fn released; waiting for marked text commit")
+    }
+
+    private func handlePhysicalRightCommandStopUp() {
+        guard phase == .stopping else { return }
+        logSessionEvent("physical_right_command_stop_up", focusStatus: overlayPanel.textInputFocusStatus)
+        applyPhysicalRightCommandStopAction(
+            physicalRightCommandStopGate.observePhysicalRightCommandUp()
+        )
+    }
+
+    private func handlePhysicalRightCommandStopInterruptedByOrdinaryKey() {
+        guard phase == .stopping else { return }
+        applyPhysicalRightCommandStopAction(
+            physicalRightCommandStopGate.observeOrdinaryKeyDown()
+        )
     }
 
     private func handleMarkedTextStateChanged(_ hasMarkedText: Bool) {
         guard phase == .preparing || phase == .recording || phase == .stopping else { return }
+        logSessionEvent(
+            hasMarkedText ? "marked_text_state_true" : "marked_text_state_false",
+            focusStatus: overlayPanel.textInputFocusStatus
+        )
         handleMarkedTextAction(markedTextCommitGate.observe(hasMarkedText: hasMarkedText))
     }
 
@@ -278,10 +464,106 @@ final class InputMethodSessionManager {
             return
         case .markedTextStarted:
             recordDirectLifecycleEvent(.markedTextStarted)
+            logSessionEvent("marked_text_started", focusStatus: overlayPanel.textInputFocusStatus)
         case .markedTextCommitted:
             recordDirectLifecycleEvent(.markedTextCommitted)
-            scheduleFinalTextLockOnNextMainLoop()
+            logSessionEvent("marked_text_committed", focusStatus: overlayPanel.textInputFocusStatus)
+            applyPhysicalRightCommandStopAction(
+                physicalRightCommandStopGate.markMarkedTextCommitted()
+            )
+        case .focusLost:
+            cancelSession(
+                message: "临时输入框在等待豆包提交时失去焦点；已安全取消，未粘贴文字",
+                reason: .stoppingFocusLost
+            )
+        case .timedOut:
+            cancelSession(
+                message: "等待豆包提交超时；已安全取消，未粘贴可能未完成的文字",
+                reason: .markedTextCommitTimedOut
+            )
         }
+    }
+
+    private func applyPhysicalRightCommandStopAction(_ action: PhysicalRightCommandStopGate.Action) {
+        switch action {
+        case .none:
+            return
+        case .startedStopping:
+            return
+        case .scheduleFinalTextLock:
+            scheduleFinalTextLockOnNextMainLoop()
+        case .nonBareCommand:
+            cancelSession(
+                message: "物理右 Command 期间检测到普通按键；已安全取消，未复制或粘贴文字",
+                reason: .sessionCancelled
+            )
+        case .timedOut:
+            cancelSession(
+                message: "等待豆包提交或物理右 Command 抬起超时；已安全取消，未复制或粘贴未确认文字",
+                reason: .markedTextCommitTimedOut
+            )
+        }
+    }
+
+    private func beginStoppingSafetyMonitoring() {
+        cancelStoppingSafetyMonitoring()
+        let generation = sessionGeneration
+
+        // Verify once on the very next main-loop turn after the stop toggle,
+        // then keep
+        // observing while waiting. The poll only detects focus loss; it never
+        // decides that a transcription is complete.
+        scheduleStoppingFocusVerification(generation: generation, immediately: true)
+
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.phase == .stopping,
+                  self.sessionGeneration == generation else { return }
+            self.logSessionEvent(
+                "physical_right_command_stop_timeout",
+                focusStatus: self.overlayPanel.textInputFocusStatus
+            )
+            self.applyPhysicalRightCommandStopAction(self.physicalRightCommandStopGate.expireWaiting())
+        }
+        markedTextCommitTimeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.markedTextCommitSafetyTimeout,
+            execute: timeoutWorkItem
+        )
+    }
+
+    private func scheduleStoppingFocusVerification(generation: UUID, immediately: Bool) {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.phase == .stopping,
+                  self.sessionGeneration == generation else { return }
+            let focusStatus = self.overlayPanel.textInputFocusStatus
+            self.logSessionEvent("stopping_focus_checked", focusStatus: focusStatus)
+            self.handleMarkedTextAction(
+                self.markedTextCommitGate.observeFocus(
+                    isConfirmed: focusStatus.isConfirmed
+                )
+            )
+            guard self.phase == .stopping,
+                  self.sessionGeneration == generation else { return }
+            self.scheduleStoppingFocusVerification(generation: generation, immediately: false)
+        }
+        stoppingFocusMonitorWorkItem = workItem
+        if immediately {
+            DispatchQueue.main.async(execute: workItem)
+        } else {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.stoppingFocusPollInterval,
+                execute: workItem
+            )
+        }
+    }
+
+    private func cancelStoppingSafetyMonitoring() {
+        stoppingFocusMonitorWorkItem?.cancel()
+        stoppingFocusMonitorWorkItem = nil
+        markedTextCommitTimeoutWorkItem?.cancel()
+        markedTextCommitTimeoutWorkItem = nil
     }
 
     private func scheduleFinalTextLockOnNextMainLoop() {
@@ -292,14 +574,36 @@ final class InputMethodSessionManager {
             guard let self,
                   self.phase == .stopping,
                   self.sessionGeneration == generation else { return }
+            guard self.overlayPanel.textInputFocusStatus.isConfirmed else {
+                self.logSessionEvent(
+                    "final_text_lock_blocked_by_focus",
+                    focusStatus: self.overlayPanel.textInputFocusStatus
+                )
+                self.handleMarkedTextAction(
+                    self.markedTextCommitGate.observeFocus(isConfirmed: false)
+                )
+                return
+            }
             let frozenText = self.overlayPanel.currentText()
             self.recordDirectLifecycleEvent(.finalTextLocked, textLength: frozenText.count)
+            self.logSessionEvent(
+                "final_text_locked",
+                textLength: frozenText.count,
+                focusStatus: self.overlayPanel.textInputFocusStatus
+            )
             self.completeSession(withFrozenText: frozenText)
         }
     }
 
     private func completeSession(withFrozenText frozenText: String) {
         guard phase == .stopping else { return }
+        guard !rightCommandIsDown else {
+            cancelSession(
+                message: "右 Command 尚未释放；已安全取消，未复制或粘贴文字",
+                reason: .functionKeyPostFailed
+            )
+            return
+        }
         let text = frozenText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             if let identity = currentDirectPasteIdentity {
@@ -308,7 +612,7 @@ final class InputMethodSessionManager {
                     reason: .emptyTranscription
                 )
             }
-            closeSession()
+            closeSession(releasingRightCommand: false)
             print("[InputMethodSessionManager] ⚠️ Session completed with no text to copy")
             return
         }
@@ -317,6 +621,7 @@ final class InputMethodSessionManager {
         // Freeze routing at recording start. A menu change applies to the next
         // recording and cannot create a late order without recording metadata.
         let route = currentPasteRoute ?? PasteRouter().route(for: target)
+        let completedSessionID = sessionGeneration
         let generation = pasteGeneration
         let directIdentity = currentDirectPasteIdentity
         if route == .uuDirect, let directIdentity {
@@ -328,18 +633,33 @@ final class InputMethodSessionManager {
             )
         }
         logPasteRoute(route, target: target, event: "session completion")
+        logSessionEvent(
+            "session_completion_authorized",
+            sessionID: completedSessionID,
+            route: route,
+            target: target,
+            textLength: text.count
+        )
         if PasteRouter.shouldPrepublishLocalClipboard(for: route) {
             // Compatibility mode starts UU's normal clipboard sync before the
             // controller restores focus. Direct mode stays out of this channel.
-            PasteHelper.copyOnly(text)
+            let copied = PasteHelper.copyOnly(text)
+            logSessionEvent(
+                copied ? "compatibility_clipboard_prepublish_succeeded" : "compatibility_clipboard_prepublish_failed",
+                sessionID: completedSessionID,
+                route: route,
+                target: target,
+                textLength: text.count
+            )
         }
-        closeSession()
+        closeSession(releasingRightCommand: false)
         schedulePaste(
             text,
             route: route,
             target: target,
             generation: generation,
-            directIdentity: directIdentity
+            directIdentity: directIdentity,
+            traceSessionID: completedSessionID
         )
         print("[InputMethodSessionManager] ✅ Session completed (text length: \(text.count))")
     }
@@ -349,7 +669,8 @@ final class InputMethodSessionManager {
         route: PasteRoute,
         target: NSRunningApplication?,
         generation: UUID,
-        directIdentity: PasteOrderIdentity?
+        directIdentity: PasteOrderIdentity?,
+        traceSessionID: UUID
     ) {
         clipboardPublishWorkItem?.cancel()
         PasteHelper.cancelPendingPaste()
@@ -365,8 +686,22 @@ final class InputMethodSessionManager {
                 }
             },
             uuCompatibility: { [weak self] in
+                self?.logSessionEvent(
+                    "compatibility_route_started",
+                    sessionID: traceSessionID,
+                    route: route,
+                    target: target,
+                    textLength: text.count
+                )
                 self?.waitUntilPasteTargetIsFrontmost(target: target, generation: generation) { isFrontmost in
                     guard let self else { return }
+                    self.logSessionEvent(
+                        isFrontmost ? "compatibility_target_frontmost" : "compatibility_target_not_frontmost",
+                        sessionID: traceSessionID,
+                        route: route,
+                        target: target,
+                        textLength: text.count
+                    )
                     guard PasteHelper.ClipboardDefensePolicy.initialTargetDecision(
                         targetIsFrontmost: isFrontmost
                     ) == .continueDefending else {
@@ -428,26 +763,40 @@ final class InputMethodSessionManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.frontmostPollInterval, execute: workItem)
     }
 
-    private func cancelSession() {
+    private func cancelSession(
+        message: String = "Session cancelled and previous input source restored",
+        reason: DirectPasteCancellationReason = .sessionCancelled
+    ) {
         invalidatePendingPaste()
         guard phase != .idle else { return }
+        logSessionEvent(
+            "session_cancelled",
+            reason: reason.rawValue,
+            focusStatus: overlayPanel.textInputFocusStatus
+        )
         if let identity = currentDirectPasteIdentity {
             directPasteOrderCoordinator.abandonRecording(
                 identity: identity,
-                reason: .sessionCancelled
+                reason: reason
             )
         }
         closeSession()
-        print("[InputMethodSessionManager] Session cancelled and previous input source restored")
+        print("[InputMethodSessionManager] \(message)")
     }
 
-    private func closeSession() {
+    private func closeSession(releasingRightCommand: Bool = true) {
+        logSessionEvent("session_closing", focusStatus: overlayPanel.textInputFocusStatus)
+        hotkeyManager.cancelStopHotkeyReleaseTracking()
         recordingReadinessGate.cancel()
         markedTextCommitGate.cancel()
+        physicalRightCommandStopGate.cancel()
+        cancelStoppingSafetyMonitoring()
         sessionGeneration = UUID()
         finalTextLockIsScheduled = false
         overlayPanel.cancelTextInputFocusRequest()
-        _ = setFunctionKeyPressed(false)
+        if releasingRightCommand {
+            releaseRightCommandIfNeeded()
+        }
         phase = .idle
         hotkeyManager.setEscapeHandlingEnabled(false)
         overlayPanel.hideOverlay()
@@ -509,15 +858,77 @@ final class InputMethodSessionManager {
         print("[InputMethodSessionManager] route=\(route) targetBundle=\(bundleIdentifier) targetPID=\(processIdentifier) event=\(event)")
     }
 
-    @discardableResult
-    private func setFunctionKeyPressed(_ isPressed: Bool) -> Bool {
-        guard functionKeyIsDown != isPressed else { return true }
-        guard FunctionKeyInjector.post(isPressed) else {
-            print("[InputMethodSessionManager] ⚠️ Failed to post synthetic Fn event")
-            return false
+    private func logSessionEvent(
+        _ event: String,
+        sessionID: UUID? = nil,
+        reason: String = "none",
+        route: PasteRoute? = nil,
+        target: NSRunningApplication? = nil,
+        textLength: Int = -1,
+        focusStatus: TextInputFocusStatus? = nil
+    ) {
+        let resolvedSessionID = (sessionID ?? sessionGeneration).uuidString
+        let phaseName = String(describing: phase)
+        let routeName = route.map { String(describing: $0) }
+            ?? currentPasteRoute.map { String(describing: $0) }
+            ?? "none"
+        let resolvedFocus = String(describing: focusStatus ?? overlayPanel.textInputFocusStatus)
+        let targetApp = target ?? pasteTargetApp
+        let targetPID = targetApp?.processIdentifier ?? -1
+        let targetBundleIdentifier = targetApp?.bundleIdentifier ?? "none"
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let frontmostPID = frontmostApp?.processIdentifier ?? -1
+        let frontmostBundleIdentifier = frontmostApp?.bundleIdentifier ?? "none"
+        let hasMarkedText = overlayPanel.hasMarkedText
+        sessionLogger.notice(
+            "event=\(event, privacy: .public) session=\(resolvedSessionID, privacy: .public) phase=\(phaseName, privacy: .public) route=\(routeName, privacy: .public) focus=\(resolvedFocus, privacy: .public) marked=\(hasMarkedText, privacy: .public) rightCommandDown=\(self.rightCommandIsDown, privacy: .public) appActive=\(NSApp.isActive, privacy: .public) frontmostPID=\(frontmostPID, privacy: .public) frontmostBundle=\(frontmostBundleIdentifier, privacy: .public) textLength=\(textLength, privacy: .public) targetPID=\(targetPID, privacy: .public) targetBundle=\(targetBundleIdentifier, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+    }
+
+    private func postRightCommandTap(kind: RightCommandTapKind, completion: @escaping (Bool) -> Void) {
+        guard !rightCommandIsDown,
+              RightCommandInjector.post(isPressed: true)
+        else {
+            completion(false)
+            return
         }
-        functionKeyIsDown = isPressed
-        return true
+        rightCommandIsDown = true
+        rightCommandTapKind = kind
+        logSessionEvent("\(kind.diagnosticPrefix)_down")
+        let generation = sessionGeneration
+        let releaseWorkItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.sessionGeneration == generation,
+                  self.rightCommandIsDown else { return }
+            guard RightCommandInjector.post(isPressed: false) else {
+                self.logSessionEvent("\(kind.diagnosticPrefix)_up_failed")
+                completion(false)
+                return
+            }
+            self.rightCommandIsDown = false
+            self.rightCommandTapKind = nil
+            self.logSessionEvent("\(kind.diagnosticPrefix)_up")
+            completion(true)
+        }
+        rightCommandReleaseWorkItem = releaseWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rightCommandPressDuration, execute: releaseWorkItem)
+    }
+
+    private func releaseRightCommandIfNeeded() {
+        rightCommandReleaseWorkItem?.cancel()
+        rightCommandReleaseWorkItem = nil
+        guard rightCommandIsDown else { return }
+        let kind = rightCommandTapKind
+        guard RightCommandInjector.post(isPressed: false) else {
+            logSessionEvent("right_command_release_retry_failed")
+            print("[InputMethodSessionManager] ⚠️ Failed to release synthetic right Command; retaining down state")
+            return
+        }
+        rightCommandIsDown = false
+        rightCommandTapKind = nil
+        if let kind {
+            logSessionEvent("\(kind.diagnosticPrefix)_up")
+        }
     }
 
     private func recordDirectLifecycleEvent(
@@ -558,22 +969,25 @@ final class InputMethodSessionManager {
     }
 }
 
-/// Posts the public virtual-key equivalent of the physical Fn key.  This is a
-/// local event only; no private input-method APIs or third-party code are used.
-private enum FunctionKeyInjector {
+/// Posts the public virtual-key equivalent of the physical right Command key.
+private enum RightCommandInjector {
     @discardableResult
-    static func post(_ isPressed: Bool) -> Bool {
+    static func post(isPressed: Bool) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState),
               let event = CGEvent(
                   keyboardEventSource: source,
-                  virtualKey: 63, // kVK_Function
+                  virtualKey: 54, // kVK_RightCommand
                   keyDown: isPressed
               )
         else {
             return false
         }
 
-        event.flags = isPressed ? .maskSecondaryFn : []
+        event.flags = isPressed ? [.maskCommand, .maskNonCoalesced] : .maskNonCoalesced
+        event.type = .flagsChanged
+        functionKeyDiagnosticsLogger.notice(
+            "origin=injector isPressed=\(isPressed, privacy: .public) eventType=\(event.type.rawValue, privacy: .public) flags=\(event.flags.rawValue, privacy: .public) keyCode=\(event.getIntegerValueField(.keyboardEventKeycode), privacy: .public) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID), privacy: .public) sourceState=\(event.getIntegerValueField(.eventSourceStateID), privacy: .public) keyboardType=\(event.getIntegerValueField(.keyboardEventKeyboardType), privacy: .public)"
+        )
         event.post(tap: .cghidEventTap)
         return true
     }

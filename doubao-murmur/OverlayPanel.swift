@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+enum TextInputFocusStatus: Equatable {
+    case confirmed
+    case textViewUnavailable
+    case panelNotKey
+    case textViewNotFirstResponder
+
+    static func evaluate(
+        panelIsKeyWindow: Bool,
+        textViewIsAvailable: Bool,
+        textViewIsFirstResponder: Bool
+    ) -> TextInputFocusStatus {
+        guard textViewIsAvailable else { return .textViewUnavailable }
+        guard panelIsKeyWindow else { return .panelNotKey }
+        guard textViewIsFirstResponder else { return .textViewNotFirstResponder }
+        return .confirmed
+    }
+
+    var isConfirmed: Bool {
+        self == .confirmed
+    }
+}
+
 class OverlayPanel: NSPanel {
     private let appState: AppState
     private weak var textView: IMETrackingTextView?
@@ -62,11 +84,30 @@ class OverlayPanel: NSPanel {
         print("[OverlayPanel] ✅ Overlay is now visible (isVisible=\(isVisible), isKeyWindow=\(isKeyWindow))")
     }
 
-    func maintainTextInputFocus() {
+    /// Make this panel's text view the client before Fn-up, then return the
+    /// actual AppKit focus state. Callers must treat any non-confirmed state as
+    /// a cancellation, never as proof that an IME commit occurred.
+    @discardableResult
+    func ensureTextInputFocus() -> TextInputFocusStatus {
+        guard let textView else { return .textViewUnavailable }
         makeKey()
-        if let textView {
-            makeFirstResponder(textView)
+        let accepted = makeFirstResponder(textView)
+        let status = textInputFocusStatus
+        // Treat a refusal as failure even if an AppKit transition happened to
+        // leave the old responder in place. We need both an accepted request
+        // and the observable responder identity before releasing Fn.
+        guard accepted else {
+            return status.isConfirmed ? .textViewNotFirstResponder : status
         }
+        return status
+    }
+
+    var textInputFocusStatus: TextInputFocusStatus {
+        TextInputFocusStatus.evaluate(
+            panelIsKeyWindow: isKeyWindow,
+            textViewIsAvailable: textView != nil,
+            textViewIsFirstResponder: textView.map { firstResponder === $0 } ?? false
+        )
     }
 
     func cancelTextInputFocusRequest() {

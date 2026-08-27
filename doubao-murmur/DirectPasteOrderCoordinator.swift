@@ -16,6 +16,8 @@ enum DirectPasteCancellationReason: String, Equatable {
     case routeUnavailableBeforeSubmit = "route_unavailable_before_submit"
     case focusReadinessFailed = "focus_readiness_failed"
     case functionKeyPostFailed = "function_key_post_failed"
+    case stoppingFocusLost = "stopping_focus_lost"
+    case markedTextCommitTimedOut = "marked_text_commit_timed_out"
 }
 
 enum DirectPasteLifecycleEvent: String, Equatable {
