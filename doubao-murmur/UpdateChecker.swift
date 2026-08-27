@@ -7,7 +7,7 @@ struct UpdateChecker {
         let downloadURL: URL
         /// Direct URL to the ZIP asset
         var assetURL: URL {
-            URL(string: "https://github.com/\(repo)/releases/download/\(tag)/Doubao-Murmur-\(tag).zip")!
+            UpdateChecker.assetURL(forTag: tag)
         }
     }
 
@@ -25,8 +25,12 @@ struct UpdateChecker {
         }
     }
 
-    private static let repo = "lilong7676/doubao-murmur"
-    private static let latestURL = "https://github.com/\(repo)/releases/latest"
+    static let repository = "devon-kong/doubao-murmur"
+    private static let latestURL = "https://github.com/\(repository)/releases/latest"
+
+    static func assetURL(forTag tag: String) -> URL {
+        URL(string: "https://github.com/\(repository)/releases/download/\(tag)/Doubao-Murmur-\(tag).zip")!
+    }
 
     static func check() async throws -> UpdateInfo? {
         guard let url = URL(string: latestURL) else { return nil }
@@ -48,7 +52,7 @@ struct UpdateChecker {
             throw CheckError.noRelease
         }
 
-        // Location is like: https://github.com/lilong7676/doubao-murmur/releases/tag/v1.1.1
+        // Location is like: https://github.com/devon-kong/doubao-murmur/releases/tag/v1.3.0
         let tag = redirectURL.lastPathComponent
         let remoteVersion = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
@@ -59,7 +63,7 @@ struct UpdateChecker {
         return nil
     }
 
-    private static func isNewer(remote: String, current: String) -> Bool {
+    static func isNewer(remote: String, current: String) -> Bool {
         let r = remote.split(separator: ".").compactMap { Int($0) }
         let c = current.split(separator: ".").compactMap { Int($0) }
         for i in 0..<max(r.count, c.count) {

@@ -78,7 +78,7 @@ xcodegen generate
 
 或 `./scripts/dev.sh` 一次完成构建和运行。
 
-推送 `v*` tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，构建 macOS `.app` 并附加到 GitHub Release。
+推送 `v*` tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，构建 universal macOS `.app`，并附加 `Doubao-Murmur-vX.X.X.zip` 与同一提交的 Mac mini `murmur-mirror` helper ZIP 到 GitHub Release。
 
 ## License
 

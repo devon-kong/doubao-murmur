@@ -9,7 +9,7 @@ options:
 settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.doubao.murmur
-    MARKETING_VERSION: "1.2.1"
+    MARKETING_VERSION: "1.3.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"

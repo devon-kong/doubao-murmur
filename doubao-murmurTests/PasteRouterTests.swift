@@ -2,6 +2,29 @@ import Foundation
 import XCTest
 @testable import Doubao_Murmur
 
+final class UpdateCheckerTests: XCTestCase {
+    func testUsesCurrentIndependentRepositoryAndExpectedAppAssetName() {
+        let update = UpdateChecker.UpdateInfo(
+            version: "1.3.0",
+            tag: "v1.3.0",
+            downloadURL: URL(string: "https://github.com/devon-kong/doubao-murmur/releases/tag/v1.3.0")!
+        )
+
+        XCTAssertEqual(UpdateChecker.repository, "devon-kong/doubao-murmur")
+        XCTAssertEqual(
+            update.assetURL.absoluteString,
+            "https://github.com/devon-kong/doubao-murmur/releases/download/v1.3.0/Doubao-Murmur-v1.3.0.zip"
+        )
+    }
+
+    func testVersionComparisonTreatsMissingComponentsAsZero() {
+        XCTAssertTrue(UpdateChecker.isNewer(remote: "1.3.0", current: "1.2.9"))
+        XCTAssertTrue(UpdateChecker.isNewer(remote: "1.3.1", current: "1.3"))
+        XCTAssertFalse(UpdateChecker.isNewer(remote: "1.3.0", current: "1.3"))
+        XCTAssertFalse(UpdateChecker.isNewer(remote: "1.2.9", current: "1.3.0"))
+    }
+}
+
 final class PasteRouterTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
